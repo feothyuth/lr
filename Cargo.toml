@@ -1,0 +1,400 @@
+[package]
+name = "lighter_client"
+version = "0.1.0"
+authors = ["Arixon"]
+description = "Typed Rust SDK for interacting with the Lighter exchange APIs"
+# Override this license by providing a License Object in the OpenAPI.
+license = "Unlicense"
+edition = "2021"
+readme = "README.md"
+keywords = ["lighter", "exchange", "sdk", "trading", "defi"]
+categories = ["api-bindings", "cryptography::cryptocurrencies"]
+
+[dependencies]
+serde = { version = "^1.0", features = ["derive"] }
+serde_json = "^1.0"
+serde_repr = "^0.1"
+url = "^2.5"
+reqwest = { version = "^0.12", default-features = false, features = ["json", "multipart"] }
+alloy = "1.0.37"
+tokio = { version = "1.47.1", features = ["full"] }
+libloading = "0.8"
+thiserror = "1.0"
+async-trait = "0.1"
+alloy-signer = "1.0.37"
+alloy-signer-local = "1.0.37"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"], optional = true }
+tokio-tungstenite = { version = "0.23", features = ["rustls-tls-native-roots"] }
+futures-util = "0.3"
+time = "0.3"
+chrono = "0.4.42"
+rand = "0.8"
+
+[features]
+default = ["rustls-tls"]
+native-tls = ["reqwest/native-tls"]
+rustls-tls = ["reqwest/rustls-tls"]
+timings = ["dep:tracing-subscriber"]
+
+[dev-dependencies]
+toml = "0.8"
+dotenvy = "0.15"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+anyhow = "1.0"
+
+[[example]]
+name = "orderbook_depth_analysis"
+path = "examples/monitoring/orderbook_depth_analysis.rs"
+
+[[example]]
+name = "test_simple_limit"
+path = "examples/order_management/test_simple_limit.rs"
+
+[[example]]
+name = "test_postonly_order"
+path = "examples/order_management/test_postonly_order.rs"
+
+[[example]]
+name = "test_market_order"
+path = "examples/order_management/test_market_order.rs"
+
+[[example]]
+name = "test_reduceonly_order"
+path = "examples/order_management/test_reduceonly_order.rs"
+
+[[example]]
+name = "test_cancel_single"
+path = "examples/order_management/test_cancel_single.rs"
+
+[[example]]
+name = "test_batch_tx"
+path = "examples/order_management/test_batch_tx.rs"
+
+[[example]]
+name = "test_batch_cancel"
+path = "examples/order_management/test_batch_cancel.rs"
+
+[[example]]
+name = "test_cancel_all"
+path = "examples/order_management/test_cancel_all.rs"
+
+[[example]]
+name = "test_cancel_all_rest"
+path = "examples/order_management/test_cancel_all_rest.rs"
+
+[[example]]
+name = "test_cancel_replace"
+path = "examples/order_management/test_cancel_replace.rs"
+
+[[example]]
+name = "test_cancel_replace_batch"
+path = "examples/order_management/test_cancel_replace_batch.rs"
+
+[[example]]
+name = "test_all_17_channels"
+path = "examples/websocket/test_all_17_channels.rs"
+
+[[example]]
+name = "test_17_channels"
+path = "examples/websocket/test_17_channels.rs"
+
+[[example]]
+name = "test_orderbook"
+path = "examples/websocket/test_orderbook.rs"
+
+[[example]]
+name = "close_position"
+path = "examples/order_management/close_position.rs"
+
+[[example]]
+name = "close_position_ws"
+path = "examples/order_management/close_position_ws.rs"
+
+[[example]]
+name = "close_position_limit_ioc"
+path = "examples/order_management/close_position_limit_ioc.rs"
+
+[[example]]
+name = "close_position_limit_ioc_ws"
+path = "examples/order_management/close_position_limit_ioc_ws.rs"
+
+[[example]]
+name = "benchmark_ws_parallel_close"
+path = "examples/benchmarks/benchmark_ws_parallel_close.rs"
+
+[[example]]
+name = "benchmark_close_methods"
+path = "examples/benchmarks/benchmark_close_methods.rs"
+
+[[example]]
+name = "benchmark_order_latency"
+path = "examples/benchmarks/benchmark_order_latency.rs"
+
+[[example]]
+name = "benchmark_batch_vs_single"
+path = "examples/benchmarks/benchmark_batch_vs_single.rs"
+
+[[example]]
+name = "benchmark_batch_submit"
+path = "examples/benchmarks/benchmark_batch_submit.rs"
+
+[[example]]
+name = "benchmark_single_submit"
+path = "examples/benchmarks/benchmark_single_submit.rs"
+
+[[example]]
+name = "benchmark_batch_submit_v2"
+path = "examples/benchmarks/benchmark_batch_submit_v2.rs"
+
+[[example]]
+name = "benchmark_single_submit_v2"
+path = "examples/benchmarks/benchmark_single_submit_v2.rs"
+
+[[example]]
+name = "bench_ws_vs_rest"
+path = "examples/benchmarks/bench_ws_vs_rest.rs"
+
+[[example]]
+name = "monitor_active_orders"
+path = "examples/monitoring/monitor_active_orders.rs"
+
+[[example]]
+name = "monitor_trade_fills"
+path = "examples/monitoring/monitor_trade_fills.rs"
+
+[[example]]
+name = "multi_channel_monitor"
+path = "examples/monitoring/multi_channel_monitor.rs"
+
+[[example]]
+name = "monitor_market_v3"
+path = "examples/monitoring/v3_test/monitor_market_v3.rs"
+
+[[example]]
+name = "01_quickstart"
+path = "examples/quickstart/01_quickstart.rs"
+
+[[example]]
+name = "02_order_lifecycle"
+path = "examples/quickstart/02_order_lifecycle.rs"
+
+[[example]]
+name = "03_market_data"
+path = "examples/quickstart/03_market_data.rs"
+
+[[example]]
+name = "04_account_history"
+path = "examples/quickstart/04_account_history.rs"
+
+[[example]]
+name = "05_websocket"
+path = "examples/quickstart/05_websocket.rs"
+
+[[example]]
+name = "06_websocket_all_channels"
+path = "examples/quickstart/06_websocket_all_channels.rs"
+
+[[example]]
+name = "07_websocket_transaction"
+path = "examples/quickstart/07_websocket_transaction.rs"
+
+[[example]]
+name = "08_close_position"
+path = "examples/quickstart/08_close_position.rs"
+
+[[example]]
+name = "09_batch_transactions"
+path = "examples/quickstart/09_batch_transactions.rs"
+
+[[example]]
+name = "10_market_making_bot"
+path = "examples/quickstart/10_market_making_bot.rs"
+
+[[example]]
+name = "advanced_order_tests"
+path = "examples/order_management/advanced_order_tests.rs"
+
+[[example]]
+name = "place_visible_orders"
+path = "examples/order_management/place_visible_orders.rs"
+
+[[example]]
+name = "submit_test_order"
+path = "examples/order_management/submit_test_order.rs"
+
+[[example]]
+name = "test_eth_order"
+path = "examples/order_management/test_eth_order.rs"
+
+[[example]]
+name = "test_market_reduce_only"
+path = "examples/order_management/test_market_reduce_only.rs"
+
+[[example]]
+name = "test_proper_close_position"
+path = "examples/order_management/test_proper_close_position.rs"
+
+[[example]]
+name = "test_specific_order"
+path = "examples/order_management/test_specific_order.rs"
+
+[[example]]
+name = "test_update_margin"
+path = "examples/order_management/test_update_margin.rs"
+
+[[example]]
+name = "transaction_submission_test"
+path = "examples/order_management/transaction_submission_test.rs"
+
+[[example]]
+name = "channel_data_collection_test"
+path = "examples/monitoring/channel_data_collection_test.rs"
+
+[[example]]
+name = "compare_prices"
+path = "examples/monitoring/compare_prices.rs"
+
+[[example]]
+name = "position_monitor"
+path = "examples/monitoring/position_monitor.rs"
+
+[[example]]
+name = "check_margin"
+path = "examples/rest_api/check_margin.rs"
+
+[[example]]
+name = "check_open_orders"
+path = "examples/rest_api/check_open_orders.rs"
+
+[[example]]
+name = "check_orders"
+path = "examples/rest_api/check_orders.rs"
+
+[[example]]
+name = "test_auth_signing"
+path = "examples/rest_api/test_auth_signing.rs"
+
+[[example]]
+name = "test_full_order_lifecycle"
+path = "examples/rest_api/test_full_order_lifecycle.rs"
+
+[[example]]
+name = "test_get_account_info"
+path = "examples/rest_api/test_get_account_info.rs"
+
+[[example]]
+name = "test_get_active_orders"
+path = "examples/rest_api/test_get_active_orders.rs"
+
+[[example]]
+name = "test_get_fills"
+path = "examples/rest_api/test_get_fills.rs"
+
+[[example]]
+name = "test_get_funding_rates"
+path = "examples/rest_api/test_get_funding_rates.rs"
+
+[[example]]
+name = "test_get_inactive_orders"
+path = "examples/rest_api/test_get_inactive_orders.rs"
+
+[[example]]
+name = "test_get_market_stats"
+path = "examples/rest_api/test_get_market_stats.rs"
+
+[[example]]
+name = "test_get_nonce"
+path = "examples/rest_api/test_get_nonce.rs"
+
+[[example]]
+name = "test_get_orderbook"
+path = "examples/rest_api/test_get_orderbook.rs"
+
+[[example]]
+name = "test_get_pnl"
+path = "examples/rest_api/test_get_pnl.rs"
+
+[[example]]
+name = "test_get_positions"
+path = "examples/rest_api/test_get_positions.rs"
+
+[[example]]
+name = "test_get_recent_trades"
+path = "examples/rest_api/test_get_recent_trades.rs"
+
+[[example]]
+name = "test_send_safe_order"
+path = "examples/rest_api/test_send_safe_order.rs"
+
+[[example]]
+name = "test_send_transaction"
+path = "examples/rest_api/test_send_transaction.rs"
+
+[[example]]
+name = "inventory_skew_adjuster"
+path = "examples/trading/inventory_skew_adjuster.rs"
+
+[[example]]
+name = "simple_twoside_mm"
+path = "examples/trading/simple_twoside_mm.rs"
+
+[[example]]
+name = "simple_twoside_mm_microprice"
+path = "examples/trading/simple_twoside_mm_microprice.rs"
+
+[[example]]
+name = "simple_twoside_mm_mark"
+path = "examples/trading/simple_twoside_mm_mark.rs"
+
+[[example]]
+name = "simple_twoside_mm_peer"
+path = "examples/trading/simple_twoside_mm_peer.rs"
+
+[[example]]
+name = "simple_twoside_mm_obm"
+path = "examples/trading/simple_twoside_mm_obm.rs"
+
+[[example]]
+name = "simple_twoside_mm_obm_v2"
+path = "examples/trading/simple_twoside_mm_obm_v2.rs"
+
+[[example]]
+name = "simple_twoside_mm_obm_v3"
+path = "examples/trading/v3_test/simple_twoside_mm_obm_v3.rs"
+
+[[example]]
+name = "mm_hawkes"
+path = "examples/trading/v3_test/mm_hawkes.rs"
+
+[[example]]
+name = "simple_twoside_mm_obm_api"
+path = "examples/trading/simple_twoside_mm_obm_api.rs"
+
+[[example]]
+name = "book_diagnostics"
+path = "examples/trading/book_diagnostics.rs"
+
+[[example]]
+name = "quote_generator"
+path = "examples/trading/quote_generator.rs"
+
+[[example]]
+name = "simple_order_refresher"
+path = "examples/trading/simple_order_refresher.rs"
+
+[[example]]
+name = "auto_order_manager"
+path = "examples/trading/auto_order_manager.rs"
+
+[[example]]
+name = "comprehensive_websocket_test"
+path = "examples/websocket/comprehensive_websocket_test.rs"
+
+[[example]]
+name = "test_ping_pong"
+path = "examples/websocket/test_ping_pong.rs"
+
+[[example]]
+name = "websocket_stress_test"
+path = "examples/websocket/websocket_stress_test.rs"

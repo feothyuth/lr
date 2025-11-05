@@ -1,0 +1,36 @@
+● Current Inventory Caps & Behavior
+
+  Right now, after all fixes:
+
+  CAPS:
+
+  - SOFT_POS_CAP: 0.010 BTC (widening starts here)
+  - HARD_POS_CAP: 0.020 BTC (orders CANCELED here)
+  - No "mid cap" - it's progressive widening from soft to hard
+
+  CURRENT SKEW CALCULATIONS:
+
+  | Inventory | Ratio | Skew (bps) | Skew ($) | What Happens                        |
+  |-----------|-------|------------|----------|-------------------------------------|
+  | 0.000000  | 0.000 | 0.000      | $0.00    | Base spread (0.8 bps)               |
+  | 0.002500  | 0.250 | 0.062      | $0.65    | Tiny widening                       |
+  | 0.005000  | 0.500 | 0.250      | $2.61    | Moderate widening                   |
+  | 0.010000  | 1.000 | 1.000      | $10.45   | SOFT CAP - Max widening active      |
+  | 0.015000  | 1.000 | 1.000      | $10.45   | Same widening (ratio capped at 1.0) |
+  | 0.020000  | 1.000 | 1.000      | $10.45   | HARD CAP - BIDS CANCELED!           |
+
+  KEY DIFFERENCES FROM BEFORE:
+
+  1. MAX_INV_SKEW_BPS: Was 3.0 → Now 1.0 (reduced because unclamped)
+  2. Clamping: Was limited to $0.60 → Now UNCLAMPED (full $10.45 applies)
+  3. At soft cap: Was 3.0 bps clamped to nothing → Now 1.0 bps = $10.45 actual widening
+  4. At hard cap: Was still quoting → Now CANCELS orders on heavy side
+
+  BEHAVIOR:
+
+  - 0-50% of soft cap (0-0.005 BTC): Gradual widening 0 to 0.25 bps
+  - 50-100% of soft cap (0.005-0.010 BTC): Accelerating widening 0.25 to 1.0 bps
+  - Above soft cap (0.010+ BTC): Maximum 1.0 bps widening
+  - At hard cap (0.020 BTC): Stop quoting on heavy side entirely
+
+  The system now actually works - the $10.45 widening at soft cap is real and not clamped away!

@@ -1,0 +1,18 @@
+# Default configuration values for examples.
+# Environment variables still take precedence.
+
+[defaults]
+# All examples fall back to these when env vars are unset.
+market_id = 0          # ETH perpetual
+order_size = 100       # 0.001 base units (depends on market lot size)
+price_ticks = 110000   # Example limit price (1100.00 represented in ticks)
+
+[submit_test_order]
+# Override the submit_test_order demo specifically.
+# These values are safe: post-only, below market.
+price_ticks = 105000
+order_size = 100
+
+[monitor_market_v3]
+# Use BTC perpetual (market_id 1) for the v3 monitor by default.
+market_id = 1
