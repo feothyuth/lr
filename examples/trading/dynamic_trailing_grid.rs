@@ -159,10 +159,13 @@ async fn main() -> Result<()> {
         return Err(anyhow!("Not all WebSocket connections established"));
     }
 
+    // Convert tx stream into a connection so we can poll next_event (which keeps ping/pong flowing)
+    let mut tx_connection = tx_stream.into_connection();
+
     println!("🔗 All 5 WebSocket connections established!");
 
     // NOW it's safe to deploy the grid using the tx connection
-    bot.deploy_initial_grid(tx_stream.connection_mut()).await?;
+    bot.deploy_initial_grid(&mut tx_connection).await?;
     println!("🚀 Grid deployed — waiting for fills to trigger resets\n");
 
     let mut heartbeat = interval(Duration::from_secs(30));
@@ -176,7 +179,7 @@ async fn main() -> Result<()> {
                 match order_event {
                     Some(Ok(event)) => {
                         println!("📊 Order book event: {}", event_label(&event));
-                        if let Err(err) = bot.handle_event(event, tx_stream.connection_mut()).await {
+                        if let Err(err) = bot.handle_event(event, &mut tx_connection).await {
                             eprintln!("⚠️  Order book handler error: {err:#}");
                         }
                     }
@@ -196,7 +199,7 @@ async fn main() -> Result<()> {
                 match stats_event {
                     Some(Ok(event)) => {
                         println!("📈 Market stats event: {}", event_label(&event));
-                        if let Err(err) = bot.handle_event(event, tx_stream.connection_mut()).await {
+                        if let Err(err) = bot.handle_event(event, &mut tx_connection).await {
                             eprintln!("⚠️  Market stats handler error: {err:#}");
                         }
                     }
@@ -216,7 +219,7 @@ async fn main() -> Result<()> {
                 match trade_event {
                     Some(Ok(event)) => {
                         println!("💱 Trade event: {}", event_label(&event));
-                        if let Err(err) = bot.handle_event(event, tx_stream.connection_mut()).await {
+                        if let Err(err) = bot.handle_event(event, &mut tx_connection).await {
                             eprintln!("⚠️  Trade handler error: {err:#}");
                         }
                     }
@@ -236,7 +239,7 @@ async fn main() -> Result<()> {
                 match account_event {
                     Some(Ok(event)) => {
                         println!("👤 Account event: {}", event_label(&event));
-                        if let Err(err) = bot.handle_event(event, tx_stream.connection_mut()).await {
+                        if let Err(err) = bot.handle_event(event, &mut tx_connection).await {
                             eprintln!("⚠️  Account handler error: {err:#}");
                         }
                     }
@@ -252,24 +255,23 @@ async fn main() -> Result<()> {
             }
 
             // Transaction events (order confirmations)
-            tx_event = tx_stream.next() => {
+            tx_event = tx_connection.next_event() => {
                 match tx_event {
-                    Some(Ok(event)) => {
+                    Ok(Some(event)) => {
                         println!("📤 Transaction event: {}", event_label(&event));
-                        // Transaction events are typically just confirmations, log them
                         match event {
                             WsEvent::Connected => println!("📤 Tx stream reconnected"),
-                            WsEvent::Pong => {},
+                            WsEvent::Pong => {}
                             other => println!("📤 Tx event: {:?}", other),
                         }
                     }
-                    Some(Err(err)) => {
+                    Ok(None) => {
+                        println!("🔌 Transaction connection closed");
+                        break;
+                    }
+                    Err(err) => {
                         eprintln!("❌ Transaction stream error: {err}");
                         return Err(err.into());
-                    }
-                    None => {
-                        println!("🔌 Transaction stream closed");
-                        break;
                     }
                 }
             }
