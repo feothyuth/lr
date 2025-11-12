@@ -106,8 +106,7 @@ async fn main() -> Result<()> {
     println!("✅ Account stream connected (authenticated)");
 
     // 5. Transaction stream - authenticated, separate connection for sending/monitoring txs
-    let tx_builder = ctx.ws_builder().subscribe_account_tx(account);
-    let (mut tx_stream, _) = connect_private_stream(&ctx, tx_builder).await?;
+    let mut tx_connection = connect_tx_connection(&ctx, account).await?;
     println!("✅ Transaction stream connected (authenticated)");
 
     // Wait for all streams to complete handshake
@@ -136,19 +135,9 @@ async fn main() -> Result<()> {
         }
     }
 
-    while let Some(event) = tx_stream.next().await {
-        if matches!(event?, WsEvent::Connected) {
-            handshakes_complete += 1;
-            break;
-        }
-    }
-
-    if handshakes_complete != 5 {
+    if handshakes_complete != 4 {
         return Err(anyhow!("Not all WebSocket connections established"));
     }
-
-    // Convert tx stream into a connection so we can poll next_event (which keeps ping/pong flowing)
-    let mut tx_connection = tx_stream.into_connection();
 
     println!("🔗 All 5 WebSocket connections established!");
 
@@ -246,8 +235,18 @@ async fn main() -> Result<()> {
                         }
                     }
                     None => {
-                        println!("🔌 Account stream closed");
-                        break;
+                        println!("🔌 Account stream closed; reconnecting…");
+                        match connect_account_stream_with_handshake(&ctx, market, account).await {
+                            Ok(new_stream) => {
+                                account_stream = new_stream;
+                                println!("✅ Account stream reconnected");
+                                continue;
+                            }
+                            Err(reconnect_err) => {
+                                eprintln!("❌ Failed to reconnect account stream: {reconnect_err}");
+                                return Err(reconnect_err);
+                            }
+                        }
                     }
                 }
             }
@@ -264,12 +263,32 @@ async fn main() -> Result<()> {
                         }
                     }
                     Ok(None) => {
-                        println!("🔌 Transaction connection closed");
-                        break;
+                        println!("🔌 Transaction connection closed; reconnecting…");
+                        match connect_tx_connection(&ctx, account).await {
+                            Ok(new_conn) => {
+                                tx_connection = new_conn;
+                                println!("✅ Transaction connection re-established");
+                                continue;
+                            }
+                            Err(err) => {
+                                eprintln!("❌ Failed to reconnect transaction connection: {err}");
+                                return Err(err);
+                            }
+                        }
                     }
                     Err(err) => {
-                        eprintln!("❌ Transaction stream error: {err}");
-                        return Err(err.into());
+                        eprintln!("❌ Transaction stream error: {err}; reconnecting…");
+                        match connect_tx_connection(&ctx, account).await {
+                            Ok(new_conn) => {
+                                tx_connection = new_conn;
+                                println!("✅ Transaction connection re-established");
+                                continue;
+                            }
+                            Err(reconnect_err) => {
+                                eprintln!("❌ Failed to reconnect transaction connection: {reconnect_err}");
+                                return Err(reconnect_err);
+                            }
+                        }
                     }
                 }
             }
@@ -402,6 +421,19 @@ async fn wait_for_connected(stream: &mut WsStream) -> Result<()> {
         }
     }
     Err(anyhow!("stream closed before Connected event"))
+}
+
+async fn connect_tx_connection(
+    ctx: &ExampleContext,
+    account: AccountId,
+) -> Result<WsConnection> {
+    let (mut stream, _) = connect_private_stream(
+        ctx,
+        ctx.ws_builder().subscribe_account_tx(account),
+    )
+    .await?;
+    wait_for_connected(&mut stream).await?;
+    Ok(stream.into_connection())
 }
 
 // === Bot implementation ======================================================
