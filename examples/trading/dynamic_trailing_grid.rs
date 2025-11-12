@@ -38,7 +38,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     convert::TryFrom,
     env,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::{interval, sleep, MissedTickBehavior};
 
@@ -77,27 +77,15 @@ async fn main() -> Result<()> {
     println!("📡 Creating separate WebSocket connections...");
 
     // 1. Order book stream
-    let mut order_book_stream = ctx
-        .ws_builder()
-        .subscribe_order_book(market)
-        .connect()
-        .await?;
+    let mut order_book_stream = connect_order_book_stream(&ctx, market).await?;
     println!("✅ Order book stream connected");
 
     // 2. Market stats stream
-    let mut market_stats_stream = ctx
-        .ws_builder()
-        .subscribe_market_stats(market)
-        .connect()
-        .await?;
+    let mut market_stats_stream = connect_market_stats_stream(&ctx, market).await?;
     println!("✅ Market stats stream connected");
 
     // 3. Trade stream (public market trades)
-    let mut trade_stream = ctx
-        .ws_builder()
-        .subscribe_trade(market)
-        .connect()
-        .await?;
+    let mut trade_stream = connect_trade_stream(&ctx, market).await?;
     println!("✅ Trade stream connected");
 
     // 4. Account stream (orders + trades + positions) - authenticated
@@ -109,37 +97,24 @@ async fn main() -> Result<()> {
     let mut tx_connection = connect_tx_connection(&ctx, account).await?;
     println!("✅ Transaction stream connected (authenticated)");
 
-    // Wait for all streams to complete handshake
-    println!("⏳ Waiting for all WebSocket handshakes to complete...");
-    let mut handshakes_complete = 1; // account stream already awaited connected
-
-    // Wait for each stream's Connected event
-    while let Some(event) = order_book_stream.next().await {
-        if matches!(event?, WsEvent::Connected) {
-            handshakes_complete += 1;
-            break;
-        }
-    }
-
-    while let Some(event) = market_stats_stream.next().await {
-        if matches!(event?, WsEvent::Connected) {
-            handshakes_complete += 1;
-            break;
-        }
-    }
-
-    while let Some(event) = trade_stream.next().await {
-        if matches!(event?, WsEvent::Connected) {
-            handshakes_complete += 1;
-            break;
-        }
-    }
-
-    if handshakes_complete != 4 {
-        return Err(anyhow!("Not all WebSocket connections established"));
-    }
-
     println!("🔗 All 5 WebSocket connections established!");
+
+    let mut last_order_message = Instant::now();
+    let mut last_stats_message = Instant::now();
+    let mut last_trade_message = Instant::now();
+    let mut last_account_message = Instant::now();
+    let mut last_tx_message = Instant::now();
+
+    let mut order_watchdog = interval(Duration::from_millis(WATCHDOG_TICK_MS));
+    order_watchdog.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut stats_watchdog = interval(Duration::from_millis(WATCHDOG_TICK_MS));
+    stats_watchdog.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut trade_watchdog = interval(Duration::from_millis(WATCHDOG_TICK_MS));
+    trade_watchdog.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut account_watchdog = interval(Duration::from_millis(WATCHDOG_TICK_MS));
+    account_watchdog.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut tx_watchdog = interval(Duration::from_millis(WATCHDOG_TICK_MS));
+    tx_watchdog.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     // NOW it's safe to deploy the grid using the tx connection
     bot.deploy_initial_grid(&mut tx_connection).await?;
@@ -151,11 +126,82 @@ async fn main() -> Result<()> {
     println!("🔁 DEBUG: Entering main event loop");
     loop {
         tokio::select! {
+            _ = order_watchdog.tick() => {
+                if Instant::now().duration_since(last_order_message) > STREAM_IDLE_LIMIT {
+                    println!("⚠️  Order-book stream idle; reconnecting");
+                    match connect_order_book_stream(&ctx, market).await {
+                        Ok(new_stream) => {
+                            order_book_stream = new_stream;
+                            last_order_message = Instant::now();
+                        }
+                        Err(err) => {
+                            return Err(anyhow!("Failed to reconnect order-book stream: {err}"));
+                        }
+                    }
+                }
+            }
+            _ = stats_watchdog.tick() => {
+                if Instant::now().duration_since(last_stats_message) > STREAM_IDLE_LIMIT {
+                    println!("⚠️  Market-stats stream idle; reconnecting");
+                    match connect_market_stats_stream(&ctx, market).await {
+                        Ok(new_stream) => {
+                            market_stats_stream = new_stream;
+                            last_stats_message = Instant::now();
+                        }
+                        Err(err) => {
+                            return Err(anyhow!("Failed to reconnect market-stats stream: {err}"));
+                        }
+                    }
+                }
+            }
+            _ = trade_watchdog.tick() => {
+                if Instant::now().duration_since(last_trade_message) > STREAM_IDLE_LIMIT {
+                    println!("⚠️  Trade stream idle; reconnecting");
+                    match connect_trade_stream(&ctx, market).await {
+                        Ok(new_stream) => {
+                            trade_stream = new_stream;
+                            last_trade_message = Instant::now();
+                        }
+                        Err(err) => {
+                            return Err(anyhow!("Failed to reconnect trade stream: {err}"));
+                        }
+                    }
+                }
+            }
+            _ = account_watchdog.tick() => {
+                if Instant::now().duration_since(last_account_message) > STREAM_IDLE_LIMIT {
+                    println!("⚠️  Account stream idle; reconnecting");
+                    match connect_account_stream_with_handshake(&ctx, market, account).await {
+                        Ok(new_stream) => {
+                            account_stream = new_stream;
+                            last_account_message = Instant::now();
+                        }
+                        Err(err) => {
+                            return Err(anyhow!("Failed to reconnect account stream: {err}"));
+                        }
+                    }
+                }
+            }
+            _ = tx_watchdog.tick() => {
+                if Instant::now().duration_since(last_tx_message) > STREAM_IDLE_LIMIT {
+                    println!("⚠️  Tx stream idle; reconnecting");
+                    match connect_tx_connection(&ctx, account).await {
+                        Ok(new_conn) => {
+                            tx_connection = new_conn;
+                            last_tx_message = Instant::now();
+                        }
+                        Err(err) => {
+                            return Err(anyhow!("Failed to reconnect tx stream: {err}"));
+                        }
+                    }
+                }
+            }
             // Order book events
             order_event = order_book_stream.next() => {
                 match order_event {
                     Some(Ok(event)) => {
                         println!("📊 Order book event: {}", event_label(&event));
+                        last_order_message = Instant::now();
                         if let Err(err) = bot.handle_event(event, &mut tx_connection).await {
                             eprintln!("⚠️  Order book handler error: {err:#}");
                         }
@@ -176,6 +222,7 @@ async fn main() -> Result<()> {
                 match stats_event {
                     Some(Ok(event)) => {
                         println!("📈 Market stats event: {}", event_label(&event));
+                        last_stats_message = Instant::now();
                         if let Err(err) = bot.handle_event(event, &mut tx_connection).await {
                             eprintln!("⚠️  Market stats handler error: {err:#}");
                         }
@@ -196,6 +243,7 @@ async fn main() -> Result<()> {
                 match trade_event {
                     Some(Ok(event)) => {
                         println!("💱 Trade event: {}", event_label(&event));
+                        last_trade_message = Instant::now();
                         if let Err(err) = bot.handle_event(event, &mut tx_connection).await {
                             eprintln!("⚠️  Trade handler error: {err:#}");
                         }
@@ -216,6 +264,7 @@ async fn main() -> Result<()> {
                 match account_event {
                     Some(Ok(event)) => {
                         println!("👤 Account event: {}", event_label(&event));
+                        last_account_message = Instant::now();
                         if let Err(err) = bot.handle_event(event, &mut tx_connection).await {
                             eprintln!("⚠️  Account handler error: {err:#}");
                         }
@@ -225,6 +274,7 @@ async fn main() -> Result<()> {
                         match connect_account_stream_with_handshake(&ctx, market, account).await {
                             Ok(new_stream) => {
                                 account_stream = new_stream;
+                                last_account_message = Instant::now();
                                 println!("✅ Account stream reconnected");
                                 continue;
                             }
@@ -239,6 +289,7 @@ async fn main() -> Result<()> {
                         match connect_account_stream_with_handshake(&ctx, market, account).await {
                             Ok(new_stream) => {
                                 account_stream = new_stream;
+                                last_account_message = Instant::now();
                                 println!("✅ Account stream reconnected");
                                 continue;
                             }
@@ -256,6 +307,7 @@ async fn main() -> Result<()> {
                 match tx_event {
                     Ok(Some(event)) => {
                         println!("📤 Transaction event: {}", event_label(&event));
+                        last_tx_message = Instant::now();
                         match event {
                             WsEvent::Connected => println!("📤 Tx stream reconnected"),
                             WsEvent::Pong => {}
@@ -267,6 +319,7 @@ async fn main() -> Result<()> {
                         match connect_tx_connection(&ctx, account).await {
                             Ok(new_conn) => {
                                 tx_connection = new_conn;
+                                last_tx_message = Instant::now();
                                 println!("✅ Transaction connection re-established");
                                 continue;
                             }
@@ -281,6 +334,7 @@ async fn main() -> Result<()> {
                         match connect_tx_connection(&ctx, account).await {
                             Ok(new_conn) => {
                                 tx_connection = new_conn;
+                                last_tx_message = Instant::now();
                                 println!("✅ Transaction connection re-established");
                                 continue;
                             }
@@ -436,10 +490,36 @@ async fn connect_tx_connection(
     Ok(stream.into_connection())
 }
 
+async fn connect_order_book_stream(
+    ctx: &ExampleContext,
+    market: MarketId,
+) -> Result<WsStream> {
+    let mut stream = ctx.ws_builder().subscribe_order_book(market).connect().await?;
+    wait_for_connected(&mut stream).await?;
+    Ok(stream)
+}
+
+async fn connect_market_stats_stream(
+    ctx: &ExampleContext,
+    market: MarketId,
+) -> Result<WsStream> {
+    let mut stream = ctx.ws_builder().subscribe_market_stats(market).connect().await?;
+    wait_for_connected(&mut stream).await?;
+    Ok(stream)
+}
+
+async fn connect_trade_stream(ctx: &ExampleContext, market: MarketId) -> Result<WsStream> {
+    let mut stream = ctx.ws_builder().subscribe_trade(market).connect().await?;
+    wait_for_connected(&mut stream).await?;
+    Ok(stream)
+}
+
 // === Bot implementation ======================================================
 
 // Maximum trade IDs to cache (prevents unbounded memory growth)
 const MAX_TRADE_IDS: usize = 50_000;
+const STREAM_IDLE_LIMIT: Duration = Duration::from_secs(12);
+const WATCHDOG_TICK_MS: u64 = 500;
 
 struct DynamicGridBot<'a> {
     ctx: &'a ExampleContext,
@@ -461,6 +541,7 @@ struct DynamicGridBot<'a> {
     latest_order_book: Option<OrderBookSnapshot>,
     resetting_grid: bool,  // Flag to prevent duplicate fill processing
     current_position: f64,  // Net base position for configured market
+    active_order_count: usize,
 }
 
 struct MarketMetadata {
@@ -524,6 +605,7 @@ impl<'a> DynamicGridBot<'a> {
             pending_fills: VecDeque::new(),
             resetting_grid: false,
             current_position: 0.0,
+            active_order_count: 0,
         })
     }
 
@@ -569,6 +651,7 @@ impl<'a> DynamicGridBot<'a> {
 
                 // First, update positions if present
                 self.update_position_from_snapshot(&raw_json);
+                self.update_active_orders(&raw_json);
 
                 println!("📄 Raw event JSON:");
                 println!("{}\n", serde_json::to_string_pretty(&raw_json)
@@ -719,8 +802,8 @@ impl<'a> DynamicGridBot<'a> {
         // Cancel existing orders first
         self.cancel_all(connection).await?;
 
-        // Wait a bit for cancel to propagate and market to settle
-        sleep(Duration::from_millis(200)).await;
+        // Wait for outstanding orders to clear
+        self.wait_for_order_settlement(Duration::from_millis(600)).await?;
 
         // Determine anchor price
         let anchor = match self.config.mid_source {
@@ -735,6 +818,20 @@ impl<'a> DynamicGridBot<'a> {
             .unwrap_or(anchor);
 
         self.place_grid(anchor, connection, 0).await
+    }
+
+    async fn wait_for_order_settlement(&mut self, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        while self.active_order_count > 0 && Instant::now() < deadline {
+            sleep(Duration::from_millis(20)).await;
+        }
+        if self.active_order_count > 0 {
+            println!(
+                "⚠️  Timed out waiting for orders to cancel ({} remaining)",
+                self.active_order_count
+            );
+        }
+        Ok(())
     }
 
     async fn cancel_all(&mut self, connection: &mut WsConnection) -> Result<()> {
@@ -808,7 +905,6 @@ impl<'a> DynamicGridBot<'a> {
                         let mid = (snap.best_bid + snap.best_ask) / 2.0;
                         current_anchor = mid;
                         attempt_count += 1;
-                        sleep(Duration::from_millis(200)).await;
                         continue;
                     }
                 }
@@ -828,7 +924,6 @@ impl<'a> DynamicGridBot<'a> {
                         let mid = (snap.best_bid + snap.best_ask) / 2.0;
                         current_anchor = mid;
                         attempt_count += 1;
-                        sleep(Duration::from_millis(200)).await;
                         continue;
                     }
                 }
@@ -988,6 +1083,24 @@ impl<'a> DynamicGridBot<'a> {
                 }
             }
         }
+    }
+
+    fn update_active_orders(&mut self, snapshot: &Value) {
+        let market_key = self.config.market_id.into_inner().to_string();
+        let mut count = 0usize;
+        if let Some(orders_obj) = snapshot.get("orders").and_then(|v| v.as_object()) {
+            if let Some(orders) = orders_obj.get(&market_key).and_then(|v| v.as_array()) {
+                for order in orders {
+                    let remaining = parse_numeric_field(order, "remaining_base_amount")
+                        .or_else(|| parse_numeric_field(order, "size"))
+                        .unwrap_or(0.0);
+                    if remaining > 1e-9 {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        self.active_order_count = count;
     }
 }
 
