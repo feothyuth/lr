@@ -378,6 +378,9 @@ fn env_f64(key: &str, default: f64) -> f64 {
 
 // === Bot implementation ======================================================
 
+// Maximum trade IDs to cache (prevents unbounded memory growth)
+const MAX_TRADE_IDS: usize = 50_000;
+
 struct DynamicGridBot<'a> {
     ctx: &'a ExampleContext,
     signer: &'a SignerClient,
@@ -390,6 +393,7 @@ struct DynamicGridBot<'a> {
     last_trade: f64,       // Last market trade price
     last_fill_price: Option<f64>,  // Last actual fill of our orders
     processed_trade_ids: HashSet<i64>,  // Track processed trade IDs to prevent duplicates
+    processed_trade_order: VecDeque<i64>,  // Track insertion order for bounded cache
     pending_fills: VecDeque<FillEvent>,  // Queue fills during grid reset
     base_qty_units: i64,
     next_client_id: i64,
@@ -455,6 +459,7 @@ impl<'a> DynamicGridBot<'a> {
             order_tracker: OrderTracker::default(),
             latest_order_book: None,
             processed_trade_ids: HashSet::new(),
+            processed_trade_order: VecDeque::new(),
             pending_fills: VecDeque::new(),
             resetting_grid: false,
         })
@@ -552,8 +557,16 @@ impl<'a> DynamicGridBot<'a> {
                                                 continue; // Not our trade
                                             };
 
-                                            // Mark as processed
-                                            self.processed_trade_ids.insert(trade_id);
+                                            // Mark as processed with bounded cache
+                                            if self.processed_trade_ids.insert(trade_id) {
+                                                self.processed_trade_order.push_back(trade_id);
+                                                // Evict oldest if cache exceeds limit
+                                                if self.processed_trade_order.len() > MAX_TRADE_IDS {
+                                                    if let Some(old_id) = self.processed_trade_order.pop_front() {
+                                                        self.processed_trade_ids.remove(&old_id);
+                                                    }
+                                                }
+                                            }
 
                                             let fill = FillEvent {
                                                 price,
