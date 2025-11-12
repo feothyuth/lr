@@ -428,6 +428,7 @@ struct DynamicGridBot<'a> {
     order_tracker: OrderTracker,
     latest_order_book: Option<OrderBookSnapshot>,
     resetting_grid: bool,  // Flag to prevent duplicate fill processing
+    current_position: f64,  // Net base position for configured market
 }
 
 struct MarketMetadata {
@@ -490,6 +491,7 @@ impl<'a> DynamicGridBot<'a> {
             processed_trade_order: VecDeque::new(),
             pending_fills: VecDeque::new(),
             resetting_grid: false,
+            current_position: 0.0,
         })
     }
 
@@ -532,6 +534,9 @@ impl<'a> DynamicGridBot<'a> {
 
                 // Parse trades from SDK-filtered event
                 let raw_json = envelope.event.into_inner();
+
+                // First, update positions if present
+                self.update_position_from_snapshot(&raw_json);
 
                 println!("📄 Raw event JSON:");
                 println!("{}\n", serde_json::to_string_pretty(&raw_json)
@@ -927,6 +932,30 @@ impl<'a> DynamicGridBot<'a> {
             .map(|atr| (atr / anchor).clamp(0.00005, 0.01) * self.config.atr_multiplier)
             .unwrap_or(self.config.min_spacing_pct);
         atr_pct.max(self.config.min_spacing_pct)
+    }
+
+    fn update_position_from_snapshot(&mut self, snapshot: &Value) {
+        let market_key = self.config.market_id.into_inner().to_string();
+        if let Some(positions) = snapshot.get("positions").and_then(|v| v.as_object()) {
+            if let Some(position_entry) = positions.get(&market_key) {
+                if let Some(size_str) = position_entry.get("position").and_then(|v| v.as_str()) {
+                    if let Ok(size) = size_str.parse::<f64>() {
+                        let sign = position_entry
+                            .get("sign")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(1);
+                        let signed_position = size * sign as f64;
+                        if (signed_position - self.current_position).abs() > 1e-9 {
+                            println!(
+                                "📈 Position update: market {} position {} (was {})",
+                                market_key, signed_position, self.current_position
+                            );
+                            self.current_position = signed_position;
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
