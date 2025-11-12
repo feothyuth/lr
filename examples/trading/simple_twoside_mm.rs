@@ -39,8 +39,31 @@ struct RawMidStrategy {
 
 impl QuoteStrategy for RawMidStrategy {
     fn compute(&mut self, input: StrategyInput<'_>) -> Option<StrategyOutput> {
-        let bid = top_price(input.view.book.bids.first()?)?;
-        let ask = top_price(input.view.book.asks.first()?)?;
+        // Skip zero-size orders (cancelled/filled)
+        let bid = input.view.book.bids.iter().find_map(|level| {
+            let size_str = level.remaining_base_amount.as_deref().unwrap_or(&level.size);
+            if size_str == "0" || size_str == "0.0" || size_str == "0.00" || size_str.is_empty() {
+                return None;
+            }
+            let size: f64 = size_str.parse().ok()?;
+            if size > 0.0 {
+                level.price.parse::<f64>().ok()
+            } else {
+                None
+            }
+        })?;
+        let ask = input.view.book.asks.iter().find_map(|level| {
+            let size_str = level.remaining_base_amount.as_deref().unwrap_or(&level.size);
+            if size_str == "0" || size_str == "0.0" || size_str == "0.00" || size_str.is_empty() {
+                return None;
+            }
+            let size: f64 = size_str.parse().ok()?;
+            if size > 0.0 {
+                level.price.parse::<f64>().ok()
+            } else {
+                None
+            }
+        })?;
         if ask <= bid {
             return None;
         }

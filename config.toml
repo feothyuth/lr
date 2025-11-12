@@ -3,7 +3,7 @@
 
 [defaults]
 # All examples fall back to these when env vars are unset.
-market_id = 0          # ETH perpetual
+market_id = 1          # ETH perpetual
 order_size = 100       # 0.001 base units (depends on market lot size)
 price_ticks = 110000   # Example limit price (1100.00 represented in ticks)
 
@@ -16,3 +16,78 @@ order_size = 100
 [monitor_market_v3]
 # Use BTC perpetual (market_id 1) for the v3 monitor by default.
 market_id = 1
+
+# ====================================================================
+# Avellaneda-Stoikov Market Making Strategy Configuration
+# ====================================================================
+[avellaneda]
+# Core Trading Parameters
+market_id = 1                    # BTC-USDC perpetual (market_id = 1)
+order_size = 0.0002              # 0.0001 BTC per side (~$10 @ $100k BTC) - REDUCED FOR $77 CAPITAL
+
+# Avellaneda-Stoikov Parameters (conservative default profile)
+gamma = 0.12                     # Moderate risk aversion (balanced inventory mean reversion)
+kappa = 1.8                      # Typical liquidity assumption for majors
+time_horizon_hours = 1.0         # 1 hour planning horizon
+target_base_pct = 0.5            # Target inventory (0.5 = 50% in BTC, 50% in USDC)
+
+# Volatility Estimation
+vol_lookback = 120               # Rolling samples (~12 seconds at 10 Hz, ~24 seconds at 5 Hz)
+vol_ewma_alpha = 0.1             # Balanced responsiveness
+
+# Execution
+refresh_interval_ms = 20         # EVENT-DRIVEN: Minimum time between quotes (20ms rate limiter)
+min_spread_bps = 1.5             # Minimum spread (0.015%)
+max_spread_bps = 80.0            # Maximum spread (0.80%)
+
+# Risk Controls
+max_position = 0.0006            # Maximum position in BTC (~$60 @ $100k BTC)
+min_notional = 10.0              # Minimum order value in USDC ($10)
+volatility_breaker = 10.0        # Halt if volatility > 10.0 (crypto markets are volatile!)
+maker_fee_bps = 0.2              # Exchange maker fee (0.2 bps)
+min_edge_bps_total = 1.5         # Minimum total spread (after fees) in bps
+refresh_tolerance_ticks = 2      # Skip refresh if prices move ≤ 2 ticks
+inventory_partial_fraction = 0.33
+inventory_partial_age_secs = 8
+inventory_partial_bps = 6.0
+inventory_partial_cooldown_ms = 2000
+flip_gate_threshold = 8
+flip_pause_ms = 600
+flip_widen_bps = 1.0
+flip_widen_duration_ms = 1200
+ladder_ratios = [0.25, 0.50, 0.75, 1.0]
+ladder_offsets_bps = [1.0, 3.0, 5.0, 8.0]
+ladder_size_multipliers = [1.0, 0.5, 0.25, 0.1]
+ladder_hysteresis_ratio = 0.05
+kill_switch_markout_bps = -0.10
+kill_pause_secs = 5
+global_pnl_threshold_bps_per_mm = -0.30
+global_pause_secs = 10
+
+# Dry Run Mode (set to false for live trading)
+dry_run = false                   # Default to simulated mode for safety
+fast_execution = true           # Enable low-latency diffing (still waits for strict acks unless optimistic_batch_ack is true)
+optimistic_batch_ack = false    # When true, assume success if tx ack times out (advanced / risky)
+
+# ====================================================================
+# QUICK START PROFILES
+# ====================================================================
+# Copy one of these sections to [avellaneda] to use different profiles
+
+# Conservative Profile (wide spreads, low risk)
+# gamma = 0.3
+# kappa = 1.0
+# time_horizon_hours = 2.0
+# refresh_interval_ms = 500
+# min_spread_bps = 10.0
+# max_spread_bps = 200.0
+# max_position = 0.005
+
+# Aggressive Profile (tight spreads, high fill rate)
+# gamma = 0.05
+# kappa = 3.0
+# time_horizon_hours = 0.5
+# refresh_interval_ms = 100
+# min_spread_bps = 3.0
+# max_spread_bps = 50.0
+# max_position = 0.02

@@ -35,60 +35,19 @@ async fn main() -> Result<()> {
         .connect()
         .await?;
     let mut update_count = 0u32;
-    let mut bbo_count = 0u32;
     let mut bbo_quote = BboQuote::default();
-    let mut last_nonce: Option<u64> = None;
-    let mut nonce_gaps = 0u32;
-    let mut total_missed_updates = 0u64;
-    let mut gap_log: Vec<(u64, u64, u64)> = Vec::new(); // (expected, got, missed_count)
-
-    println!("📡 Subscribed to channels:");
-    println!("   ✓ order_book/{}", market.into_inner());
-    println!("   ✓ bbo/{} (testing if this exists...)", market.into_inner());
-    println!("   ✓ market_stats/{}", market.into_inner());
-    println!("   ✓ trade/{}\n", market.into_inner());
 
     while let Some(event) = stream.next().await {
         match event? {
             WsEvent::Connected => println!("🔗 Connected to Lighter WebSocket"),
             WsEvent::OrderBook(update) => {
                 update_count += 1;
-
-                // Check for nonce field (Premium feature) and detect gaps
-                if let Some(nonce) = update.nonce {
-                    if let Some(prev_nonce) = last_nonce {
-                        let expected = prev_nonce + 1;
-                        if nonce != expected {
-                            nonce_gaps += 1;
-                            if nonce > prev_nonce {
-                                // Only count as missed if nonce went forward
-                                let missed = nonce - expected;
-                                total_missed_updates += missed;
-
-                                // Log first 10 gaps for debugging
-                                if gap_log.len() < 10 {
-                                    gap_log.push((expected, nonce, missed));
-                                }
-                            }
-                        }
-                    } else {
-                        // First nonce - just record it, don't count as gap
-                        println!("📋 First nonce received: {} (this is normal, nonce is global)", nonce);
-                    }
-                    last_nonce = Some(nonce);
-                } else if update_count == 1 {
-                    println!("ℹ️  No nonce field detected (Premium feature not available or not deployed yet)");
-                }
-
-                render_depth_dashboard(update.state, update_count, bbo_count, bbo_quote, last_nonce, nonce_gaps, total_missed_updates);
+                render_depth_dashboard(update.state, update_count, bbo_quote);
             }
             WsEvent::Pong => {
                 // keep-alive acknowledgement
             }
             WsEvent::BBO(event) => {
-                bbo_count += 1;
-                println!("🔔 BBO EVENT #{} RECEIVED from subscribe_bbo()! bid={:?} ask={:?}",
-                    bbo_count, event.best_bid, event.best_ask);
                 bbo_quote.update(event.best_bid.as_deref(), event.best_ask.as_deref());
             }
             WsEvent::Closed(frame) => {
@@ -103,31 +62,10 @@ async fn main() -> Result<()> {
     }
 
     println!("\n✅ Stream finished");
-
-    // Print gap analysis
-    if !gap_log.is_empty() {
-        println!("\n📊 NONCE GAP ANALYSIS (First 10 gaps):");
-        println!("════════════════════════════════════════");
-        for (i, (expected, got, missed)) in gap_log.iter().enumerate() {
-            println!("Gap #{}: Expected {}, Got {} → Missed {} updates",
-                i + 1, expected, got, missed);
-        }
-        println!("\nTotal: {} gaps, {} missed updates", nonce_gaps, total_missed_updates);
-        println!("Reliability: {:.2}%", (update_count as f64 / (update_count as u64 + total_missed_updates) as f64) * 100.0);
-    }
-
     Ok(())
 }
 
-fn render_depth_dashboard(
-    state: OrderBookState,
-    update: u32,
-    bbo_count: u32,
-    bbo: BboQuote,
-    last_nonce: Option<u64>,
-    nonce_gaps: u32,
-    total_missed: u64,
-) {
+fn render_depth_dashboard(state: OrderBookState, update: u32, bbo: BboQuote) {
     let bids = collect_levels(&state.bids);
     let asks = collect_levels(&state.asks);
 
@@ -135,27 +73,6 @@ fn render_depth_dashboard(
     print!("\x1B[2J\x1B[1;1H");
     println!("{}", "═".repeat(80));
     println!("📊 ORDER BOOK DEPTH ANALYSIS - Update #{}", update);
-    println!("🔔 BBO Events Received: {}", bbo_count);
-
-    // Nonce tracking section
-    if let Some(nonce) = last_nonce {
-        if nonce_gaps == 0 {
-            println!("✅ Nonce: {} | No gaps detected | Reliability: 100%", nonce);
-        } else {
-            // Calculate total updates that SHOULD have happened (received + missed)
-            let total_expected = update as u64 + total_missed;
-            let reliability = if total_expected > 0 {
-                (update as f64 / total_expected as f64) * 100.0
-            } else {
-                100.0
-            };
-            println!("⚠️  Nonce: {} | Gaps: {} | Missed: {} updates | Reliability: {:.2}%",
-                nonce, nonce_gaps, total_missed, reliability);
-        }
-    } else {
-        println!("ℹ️  Nonce tracking: Not available (Premium feature)");
-    }
-
     println!("{}\n", "═".repeat(80));
 
     let best_bid = choose_best(&bids, bbo.bid, true);
@@ -296,23 +213,15 @@ fn depth_at_percentage(levels: &PriceMap, mid: f64, pct: f64, is_bid: bool) -> f
 fn top_levels(bids: &PriceMap, asks: &PriceMap, limit: usize) -> Vec<(f64, f64, f64)> {
     let mut entries = Vec::new();
 
-    // Show half bids (highest first) and half asks (lowest first) to display both sides
-    let half_limit = limit / 2;
-
-    // Get top bids (highest prices first, descending from best bid)
-    let top_bids: Vec<_> = bids.iter().rev().take(half_limit).collect();
-
-    // Get top asks (lowest prices first, ascending from best ask)
-    let top_asks: Vec<_> = asks.iter().take(limit - half_limit).collect();
-
-    // Add bids first (descending from best bid)
-    for (price, size) in top_bids {
-        entries.push((price.value(), *size, 0.0));
+    for (price, bid_size) in bids.iter().rev().take(limit) {
+        let ask_size = asks.get(price).copied().unwrap_or(0.0);
+        entries.push((price.value(), *bid_size, ask_size));
     }
 
-    // Then add asks (ascending from best ask)
-    for (price, size) in top_asks {
-        entries.push((price.value(), 0.0, *size));
+    if entries.len() < limit {
+        for (price, ask_size) in asks.iter().take(limit - entries.len()) {
+            entries.push((price.value(), 0.0, *ask_size));
+        }
     }
 
     entries

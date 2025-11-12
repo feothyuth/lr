@@ -48,6 +48,107 @@ pub const ORDER_TIME_IN_FORCE_IOC: i32 = 0;
 pub const ORDER_TIME_IN_FORCE_GTT: i32 = 1;
 pub const ORDER_TIME_IN_FORCE_POST_ONLY: i32 = 2;
 
+#[derive(Clone, Copy, Debug)]
+pub enum BatchAckMode {
+    Strict,
+    Optimistic { wait_timeout: Duration },
+}
+
+async fn send_batch_tx_ws_with_mode_internal(
+    ws: &mut WsConnection,
+    txs: Vec<(u8, String)>,
+    mode: BatchAckMode,
+) -> WsResult<Vec<bool>> {
+    const MAX_BATCH_SIZE: usize = 50;
+
+    if txs.is_empty() {
+        return Ok(vec![]);
+    }
+
+    info!("Sending batch of {} transactions", txs.len());
+
+    let mut results = Vec::with_capacity(txs.len());
+
+    for (chunk_idx, chunk) in txs.chunks(MAX_BATCH_SIZE).enumerate() {
+        debug!(
+            "Sending chunk {}/{} ({} txs)",
+            chunk_idx + 1,
+            (txs.len() + MAX_BATCH_SIZE - 1) / MAX_BATCH_SIZE,
+            chunk.len()
+        );
+
+        let tx_types: Vec<u8> = chunk.iter().map(|(tx_type, _)| *tx_type).collect();
+        let tx_infos: Vec<serde_json::Value> = chunk
+            .iter()
+            .map(|(_, tx_info)| serde_json::from_str(tx_info).unwrap_or_else(|_| json!({})))
+            .collect();
+
+        let wait_timeout = match mode {
+            BatchAckMode::Strict => Duration::from_secs(chunk.len() as u64),
+            BatchAckMode::Optimistic { wait_timeout } => wait_timeout,
+        };
+
+        match ws.send_batch_transaction(tx_types, tx_infos).await {
+            Ok(_) => match timeout(wait_timeout, ws.wait_for_tx_response(wait_timeout)).await {
+                Ok(Ok(success)) => {
+                    results.extend(vec![success; chunk.len()]);
+                }
+                Ok(Err(e)) => match mode {
+                    BatchAckMode::Strict => {
+                        error!("Batch error: {}", e);
+                        results.extend(vec![false; chunk.len()]);
+                        continue;
+                    }
+                    BatchAckMode::Optimistic { .. } => {
+                        warn!(
+                                "Fast execution: error while waiting for batch ack ({e}); assuming success"
+                            );
+                        results.extend(vec![true; chunk.len()]);
+                    }
+                },
+                Err(_) => match mode {
+                    BatchAckMode::Strict => {
+                        error!(
+                            "Batch timeout after {:?} while waiting for transaction response",
+                            wait_timeout
+                        );
+                        results.extend(vec![false; chunk.len()]);
+                        continue;
+                    }
+                    BatchAckMode::Optimistic { .. } => {
+                        debug!(
+                            "Fast execution: batch timeout after {:?}; assuming success",
+                            wait_timeout
+                        );
+                        results.extend(vec![true; chunk.len()]);
+                    }
+                },
+            },
+            Err(e) => {
+                error!("Failed to send batch: {}", e);
+                return Err(e);
+            }
+        }
+    }
+
+    let success_count = results.iter().filter(|&&r| r).count();
+    info!(
+        "Batch complete: {}/{} successful",
+        success_count,
+        results.len()
+    );
+
+    Ok(results)
+}
+
+pub async fn send_batch_tx_ws_with_mode(
+    ws: &mut WsConnection,
+    txs: Vec<(u8, String)>,
+    mode: BatchAckMode,
+) -> WsResult<Vec<bool>> {
+    send_batch_tx_ws_with_mode_internal(ws, txs, mode).await
+}
+
 /// Position data structure (matches Lighter API response)
 /// CRITICAL: Use 'sign' field for direction, NOT position > 0!
 #[derive(Debug, Clone)]
@@ -130,71 +231,7 @@ pub async fn send_batch_tx_ws(
     ws: &mut WsConnection,
     txs: Vec<(u8, String)>,
 ) -> WsResult<Vec<bool>> {
-    const MAX_BATCH_SIZE: usize = 50;
-
-    if txs.is_empty() {
-        return Ok(vec![]);
-    }
-
-    info!("Sending batch of {} transactions", txs.len());
-
-    let mut results = Vec::with_capacity(txs.len());
-
-    // Split into chunks of MAX_BATCH_SIZE
-    for (chunk_idx, chunk) in txs.chunks(MAX_BATCH_SIZE).enumerate() {
-        debug!(
-            "Sending chunk {}/{} ({} txs)",
-            chunk_idx + 1,
-            (txs.len() + MAX_BATCH_SIZE - 1) / MAX_BATCH_SIZE,
-            chunk.len()
-        );
-
-        // Prepare batch data
-        let tx_types: Vec<u8> = chunk.iter().map(|(tx_type, _)| *tx_type).collect();
-        let tx_infos: Vec<serde_json::Value> = chunk
-            .iter()
-            .map(|(_, tx_info)| serde_json::from_str(tx_info).unwrap_or_else(|_| json!({})))
-            .collect();
-
-        // Send batch via WebSocket
-        match ws.send_batch_transaction(tx_types, tx_infos).await {
-            Ok(_) => {
-                // Wait for batch response
-                match timeout(
-                    Duration::from_secs(chunk.len() as u64),
-                    ws.wait_for_tx_response(Duration::from_secs(chunk.len() as u64)),
-                )
-                .await
-                {
-                    Ok(Ok(success)) => {
-                        // For batch, assume all succeeded or all failed
-                        results.extend(vec![success; chunk.len()]);
-                    }
-                    Ok(Err(e)) => {
-                        error!("Batch error: {}", e);
-                        results.extend(vec![false; chunk.len()]);
-                    }
-                    Err(_) => {
-                        error!("Batch timeout");
-                        results.extend(vec![false; chunk.len()]);
-                    }
-                }
-            }
-            Err(e) => {
-                error!("Failed to send batch: {}", e);
-                results.extend(vec![false; chunk.len()]);
-            }
-        }
-    }
-
-    let success_count = results.iter().filter(|&&r| r).count();
-    info!(
-        "Batch complete: {}/{} successful",
-        success_count,
-        results.len()
-    );
-
-    Ok(results)
+    send_batch_tx_ws_with_mode_internal(ws, txs, BatchAckMode::Strict).await
 }
 
 /// Close a position using WebSocket transaction submission

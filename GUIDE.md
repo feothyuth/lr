@@ -91,6 +91,13 @@ LIGHTER_API_URL=https://mainnet.zklighter.elliot.ai
 
 Load it with `dotenvy` (most examples call `dotenvy::dotenv().ok();`).
 
+### WebSocket best practices
+
+- Always let each stream emit `WsEvent::Connected` before you push transactions. The SDK only sends subscription payloads after that event is delivered to your code.
+- Mirror production setups by splitting sockets per concern (order book, stats, trades, account feeds, transactions). See `examples/trading/dynamic_trailing_grid.rs` or `examples/trading/v3_test/mm_hawkes.rs` for reference builders.
+- Use `connect_private_stream` (or call `set_auth_token`) immediately after connecting private channels so the first subscribe message already includes auth.
+- Keep a dedicated transaction socket—`subscribe_account_tx(account)` is the current lightweight option—so `send_batch_tx_ws` acknowledgements never block or consume your data feeds.
+
 ---
 
 ## 5. Quick usage snippets

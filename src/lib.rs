@@ -8,6 +8,7 @@ extern crate serde_repr;
 extern crate url;
 
 pub mod apis;
+pub mod avellaneda;
 pub mod errors;
 pub mod lighter_client;
 pub mod models;

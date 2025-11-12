@@ -12,7 +12,7 @@ use lighter_client::{
     signer_client::SignerClient,
     tx_executor::{send_batch_tx_ws, TX_TYPE_CANCEL_ALL_ORDERS, TX_TYPE_CREATE_ORDER},
     types::{AccountId, ApiKeyIndex, BaseQty, MarketId, Nonce, Price},
-    ws_client::{WsConnection, WsEvent, WsStream},
+    ws_client::{WsEvent, WsStream},
 };
 use serde_json::Value;
 use std::{
@@ -302,9 +302,7 @@ struct TobGuard {
 
 enum GuardOutcome {
     Bbo { bid: f64, ask: f64, skipped: bool },
-    Escalate {
-        reason: &'static str,
-    },
+    Escalate { reason: &'static str },
 }
 
 impl TobGuard {
@@ -380,7 +378,13 @@ impl TobGuard {
         Duration::from_secs_f64(ttl_secs)
     }
 
-    fn ask_is_suspect(&self, now: Instant, best_bid: f64, best_ask: f64, cfg: &TobGuardConfig) -> bool {
+    fn ask_is_suspect(
+        &self,
+        now: Instant,
+        best_bid: f64,
+        best_ask: f64,
+        cfg: &TobGuardConfig,
+    ) -> bool {
         best_ask <= best_bid + PRICE_EPS
             && self
                 .last_ask_changed_at
@@ -389,7 +393,13 @@ impl TobGuard {
             && self.updates_since_ask_change >= cfg.min_updates
     }
 
-    fn bid_is_suspect(&self, now: Instant, best_bid: f64, best_ask: f64, cfg: &TobGuardConfig) -> bool {
+    fn bid_is_suspect(
+        &self,
+        now: Instant,
+        best_bid: f64,
+        best_ask: f64,
+        cfg: &TobGuardConfig,
+    ) -> bool {
         best_bid >= best_ask - PRICE_EPS
             && self
                 .last_bid_changed_at
@@ -425,20 +435,14 @@ struct Sockets {
     order: WsStream,
     stats: WsStream,
     account: WsStream,
-    tx: WsConnection,
 }
 
 impl Sockets {
-    async fn connect(
-        client: &LighterClient,
-        account_index: i64,
-        auth_token: &str,
-    ) -> Result<Self> {
+    async fn connect(client: &LighterClient, account_index: i64, auth_token: &str) -> Result<Self> {
         Ok(Self {
             order: connect_order_book_stream(client).await?,
             stats: connect_market_stats_stream(client).await?,
             account: connect_account_orders_stream(client, account_index, auth_token).await?,
-            tx: connect_transactions_stream(client, auth_token).await?,
         })
     }
 
@@ -451,7 +455,6 @@ impl Sockets {
         self.order = connect_order_book_stream(client).await?;
         self.stats = connect_market_stats_stream(client).await?;
         self.account = connect_account_orders_stream(client, account_index, auth_token).await?;
-        self.tx = connect_transactions_stream(client, auth_token).await?;
         Ok(())
     }
 }
@@ -533,7 +536,6 @@ async fn main() -> Result<()> {
         let mut last_order_message = Instant::now();
         let mut last_stats_message = Instant::now();
         let mut last_account_message = Instant::now();
-        let mut last_tx_message = Instant::now();
         let mut last_refresh = Instant::now() - MIN_REFRESH_INTERVAL;
         let mut last_mark: Option<(f64, Instant)> = None;
         let mut market_watchdog = MarketWatchdog::new();
@@ -550,8 +552,6 @@ async fn main() -> Result<()> {
         stats_watchdog.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut account_watchdog = interval(Duration::from_millis(500));
         account_watchdog.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut tx_watchdog = interval(Duration::from_millis(500));
-        tx_watchdog.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         'event_loop: loop {
             tokio::select! {
@@ -587,17 +587,6 @@ async fn main() -> Result<()> {
                             break 'event_loop;
                         }
                         last_account_message = Instant::now();
-                    }
-                }
-                _ = tx_watchdog.tick() => {
-                    let now = Instant::now();
-                    if now.duration_since(last_tx_message) > MAX_NO_MESSAGE_TIME {
-                        log_action("⚠️  Tx socket idle; reconnecting");
-                        if let Err(err) = sockets.tx.reconnect(Some(3)).await {
-                            log_action(&format!("❌  Tx reconnect failed: {err}"));
-                            break 'event_loop;
-                        }
-                        last_tx_message = Instant::now();
                     }
                 }
                 order_evt = sockets.order.next() => {
@@ -782,7 +771,7 @@ async fn main() -> Result<()> {
                             ];
 
                             let start = Instant::now();
-                            match send_batch_tx_ws(&mut sockets.tx, batch).await {
+                            match send_batch_tx_ws(sockets.account.connection_mut(), batch).await {
                                 Ok(results) => {
                                     log_action(&format!(
                                         "Batch result cancel={} bid={} ask={} ({:?})",
@@ -791,15 +780,13 @@ async fn main() -> Result<()> {
                                         results.get(2).copied().unwrap_or(false),
                                         start.elapsed()
                                     ));
-                                    last_tx_message = Instant::now();
                                 }
                                 Err(err) => {
-                                    log_action(&format!("❌  Batch submission failed: {err}; reconnecting tx socket"));
-                                    if let Err(conn_err) = sockets.tx.reconnect(Some(3)).await {
-                                        log_action(&format!("❌  Tx reconnect failed: {conn_err}"));
+                                    log_action(&format!("❌  Batch submission failed: {err}; reconnecting account socket"));
+                                    if let Err(conn_err) = sockets.account.connection_mut().reconnect(Some(3)).await {
+                                        log_action(&format!("❌  Account reconnect failed: {conn_err}"));
                                         break 'event_loop;
                                     }
-                                    last_tx_message = Instant::now();
                                 }
                             }
 
@@ -886,22 +873,6 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                tx_evt = sockets.tx.next_event() => {
-                    match tx_evt {
-                        Ok(Some(event)) => {
-                            last_tx_message = Instant::now();
-                            handle_tx_event(event);
-                        }
-                        Ok(None) => {
-                            log_action("⚠️  Tx connection closed by server");
-                            break 'event_loop;
-                        }
-                        Err(err) => {
-                            log_action(&format!("❌ Tx stream error: {err}"));
-                            break 'event_loop;
-                        }
-                    }
-                }
             }
         }
 
@@ -913,26 +884,6 @@ async fn main() -> Result<()> {
     }
 }
 
-fn handle_tx_event(event: WsEvent) {
-    match event {
-        WsEvent::Transaction(txs) => {
-            if txs.txs.iter().any(|tx| tx.status != 1) {
-                for tx in txs.txs {
-                    log_action(&format!(
-                        "🧾  Tx ack anomaly tx_type={} status={} hash={}",
-                        tx.tx_type, tx.status, tx.hash
-                    ));
-                }
-            }
-        }
-        WsEvent::Connected => log_action("Tx socket connected"),
-        WsEvent::Pong => {}
-        WsEvent::Closed(frame) => log_action(&format!("⚠️  Tx socket closed: {:?}", frame)),
-        other => {
-            log_action(&format!("ℹ️  Tx event {:?}", other));
-        }
-    }
-}
 
 async fn handle_account_payload(
     raw: &str,
@@ -1087,23 +1038,6 @@ async fn connect_account_orders_stream(
     Ok(stream)
 }
 
-async fn connect_transactions_stream(
-    client: &LighterClient,
-    auth_token: &str,
-) -> Result<WsConnection> {
-    let mut stream = client
-        .ws()
-        .subscribe_transactions()
-        .connect()
-        .await
-        .context("Failed to connect tx socket")?;
-    stream
-        .connection_mut()
-        .set_auth_token(auth_token.to_string());
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    log_action("Tx socket connected & authenticated");
-    Ok(stream.into_connection())
-}
 
 fn derive_bbo_guarded(
     now: Instant,

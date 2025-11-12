@@ -1318,7 +1318,7 @@ impl Sockets {
             stats: connect_market_stats_stream(client).await?,
             account: connect_account_orders_stream(client, account_index, auth_token).await?,
             trade: connect_trade_stream(client).await?,
-            tx: connect_transactions_stream(client, account_index, auth_token).await?,
+            tx: connect_transactions_stream(client, auth_token).await?,
         })
     }
 
@@ -1332,7 +1332,7 @@ impl Sockets {
         self.stats = connect_market_stats_stream(client).await?;
         self.account = connect_account_orders_stream(client, account_index, auth_token).await?;
         self.trade = connect_trade_stream(client).await?;
-        self.tx = connect_transactions_stream(client, account_index, auth_token).await?;
+        self.tx = connect_transactions_stream(client, auth_token).await?;
         Ok(())
     }
 }
@@ -2797,12 +2797,11 @@ async fn connect_trade_stream(client: &LighterClient) -> Result<WsStream> {
 
 async fn connect_transactions_stream(
     client: &LighterClient,
-    account_index: i64,
     auth_token: &str,
 ) -> Result<WsConnection> {
     let mut stream = client
         .ws()
-        .subscribe_account_tx(AccountId::new(account_index))
+        .subscribe_transactions()
         .connect()
         .await
         .context("Failed to connect transaction socket")?;

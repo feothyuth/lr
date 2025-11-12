@@ -42,8 +42,33 @@ struct MicropriceStrategy {
 
 impl QuoteStrategy for MicropriceStrategy {
     fn compute(&mut self, input: StrategyInput<'_>) -> Option<StrategyOutput> {
-        let (bid, bid_qty) = level_values(input.view.book.bids.first()?)?;
-        let (ask, ask_qty) = level_values(input.view.book.asks.first()?)?;
+        // Skip zero-size orders (cancelled/filled)
+        let (bid, bid_qty) = input.view.book.bids.iter().find_map(|level| {
+            let size_str = level.remaining_base_amount.as_deref().unwrap_or(&level.size);
+            if size_str == "0" || size_str == "0.0" || size_str == "0.00" || size_str.is_empty() {
+                return None;
+            }
+            let size: f64 = size_str.parse().ok()?;
+            if size > 0.0 {
+                let price = level.price.parse::<f64>().ok()?;
+                Some((price, size))
+            } else {
+                None
+            }
+        })?;
+        let (ask, ask_qty) = input.view.book.asks.iter().find_map(|level| {
+            let size_str = level.remaining_base_amount.as_deref().unwrap_or(&level.size);
+            if size_str == "0" || size_str == "0.0" || size_str == "0.00" || size_str.is_empty() {
+                return None;
+            }
+            let size: f64 = size_str.parse().ok()?;
+            if size > 0.0 {
+                let price = level.price.parse::<f64>().ok()?;
+                Some((price, size))
+            } else {
+                None
+            }
+        })?;
         if ask <= bid {
             return None;
         }

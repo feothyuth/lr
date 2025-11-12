@@ -30,6 +30,10 @@ futures-util = "0.3"
 time = "0.3"
 chrono = "0.4.42"
 rand = "0.8"
+ringbuffer = "0.12"
+statrs = "0.16"
+toml = "0.8"
+anyhow = "1.0"
 
 [features]
 default = ["rustls-tls"]
@@ -38,8 +42,8 @@ rustls-tls = ["reqwest/rustls-tls"]
 timings = ["dep:tracing-subscriber"]
 
 [dev-dependencies]
-toml = "0.8"
 dotenvy = "0.15"
+# keep available for examples/tests
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 anyhow = "1.0"
 
@@ -92,6 +96,10 @@ name = "test_cancel_replace_batch"
 path = "examples/order_management/test_cancel_replace_batch.rs"
 
 [[example]]
+name = "grid_batch_cancel_replace"
+path = "examples/order_management/grid_batch_cancel_replace.rs"
+
+[[example]]
 name = "test_all_17_channels"
 path = "examples/websocket/test_all_17_channels.rs"
 
@@ -130,6 +138,10 @@ path = "examples/benchmarks/benchmark_close_methods.rs"
 [[example]]
 name = "benchmark_order_latency"
 path = "examples/benchmarks/benchmark_order_latency.rs"
+
+[[example]]
+name = "benchmark_ws_optimizations"
+path = "examples/benchmarks/benchmark_ws_optimizations.rs"
 
 [[example]]
 name = "benchmark_batch_vs_single"
@@ -364,12 +376,20 @@ name = "simple_twoside_mm_obm_v3"
 path = "examples/trading/v3_test/simple_twoside_mm_obm_v3.rs"
 
 [[example]]
+name = "mm_avellaneda"
+path = "examples/trading/avellaneda/main.rs"
+
+[[example]]
 name = "mm_hawkes"
 path = "examples/trading/v3_test/mm_hawkes.rs"
 
 [[example]]
 name = "simple_twoside_mm_obm_api"
 path = "examples/trading/simple_twoside_mm_obm_api.rs"
+
+[[example]]
+name = "dynamic_trailing_grid"
+path = "examples/trading/dynamic_trailing_grid.rs"
 
 [[example]]
 name = "book_diagnostics"

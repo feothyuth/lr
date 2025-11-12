@@ -119,10 +119,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // Update watchdog
                                 last_orderbook_update = tokio::time::Instant::now();
                 // Calculate mid from Order Book BBO (real-time)
-                let best_bid = ob_event.state.bids.first()
-                    .and_then(|level| level.price.parse::<f64>().ok());
-                let best_ask = ob_event.state.asks.first()
-                    .and_then(|level| level.price.parse::<f64>().ok());
+                // Skip zero-size orders (cancelled/filled)
+                let best_bid = ob_event.state.bids.iter().find_map(|level| {
+                    let size_str = level.remaining_base_amount.as_deref().unwrap_or(&level.size);
+                    if size_str == "0" || size_str == "0.0" || size_str == "0.00" || size_str.is_empty() {
+                        return None;
+                    }
+                    let size: f64 = size_str.parse().ok()?;
+                    if size > 0.0 {
+                        level.price.parse::<f64>().ok()
+                    } else {
+                        None
+                    }
+                });
+                let best_ask = ob_event.state.asks.iter().find_map(|level| {
+                    let size_str = level.remaining_base_amount.as_deref().unwrap_or(&level.size);
+                    if size_str == "0" || size_str == "0.0" || size_str == "0.00" || size_str.is_empty() {
+                        return None;
+                    }
+                    let size: f64 = size_str.parse().ok()?;
+                    if size > 0.0 {
+                        level.price.parse::<f64>().ok()
+                    } else {
+                        None
+                    }
+                });
 
                 if let (Some(bid), Some(ask)) = (best_bid, best_ask) {
                     let current_mid = (bid + ask) / 2.0;
@@ -307,6 +328,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         log_action("✅ All orders confirmed via WebSocket!");
                                                         break 'order_wait;
                                                     }
+                                                    }
                                                 }
                                             }
                                         }
@@ -357,7 +379,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!();
                     }
                 }
-            }
+                            }
                             WsEvent::Account(account_event) => {
                                 // Detect order fills via WebSocket
                                 let event_data = account_event.event.as_value();

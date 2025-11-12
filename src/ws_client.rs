@@ -64,8 +64,6 @@ pub struct SubscriptionSet {
     pub bbo: Vec<MarketId>,
     pub trades: Vec<MarketId>,
     pub market_stats: Vec<MarketId>,
-    pub subscribe_transactions: bool,
-    pub subscribe_executed_transactions: bool,
     pub subscribe_height: bool,
     // Private channels (per account)
     pub account_all_positions: Vec<AccountId>,
@@ -150,8 +148,6 @@ impl SubscriptionSet {
             && self.bbo.is_empty()
             && self.trades.is_empty()
             && self.market_stats.is_empty()
-            && !self.subscribe_transactions
-            && !self.subscribe_executed_transactions
             && !self.subscribe_height
             && self.account_all_positions.is_empty()
             && self.account_all_trades.is_empty()
@@ -234,15 +230,6 @@ impl<'a> WsBuilder<'a> {
         self
     }
 
-    pub fn subscribe_transactions(mut self) -> Self {
-        self.subscriptions.subscribe_transactions = true;
-        self
-    }
-
-    pub fn subscribe_executed_transactions(mut self) -> Self {
-        self.subscriptions.subscribe_executed_transactions = true;
-        self
-    }
 
     pub fn subscribe_height(mut self) -> Self {
         self.subscriptions.subscribe_height = true;
@@ -439,6 +426,7 @@ pub struct WsConnection {
     message_id: u64,
     generation: u64,
     suppress_already_subscribed_until: Option<Instant>,
+    pending_events: std::collections::VecDeque<WsEvent>,
 }
 
 #[derive(Debug, Default)]
@@ -446,6 +434,8 @@ struct WsState {
     order_books: HashMap<MarketId, OrderBookState>,
     order_book_offsets: HashMap<MarketId, i64>,
     accounts: HashMap<AccountId, AccountEvent>,
+    /// Cached BBO (Best Bid/Offer) for each market - stored as strings to avoid repeated parsing
+    bbo_cache: HashMap<MarketId, (Option<String>, Option<String>)>,
 }
 
 impl WsConnection {
@@ -465,6 +455,7 @@ impl WsConnection {
             message_id: 0,
             generation: 0,
             suppress_already_subscribed_until: Some(Instant::now() + SUPPRESS_ALREADY_SUB_DURATION),
+            pending_events: std::collections::VecDeque::new(),
         }
     }
 
@@ -529,6 +520,11 @@ impl WsConnection {
 
     pub async fn next_event(&mut self) -> WsResult<Option<WsEvent>> {
         use tokio::time::timeout;
+
+        // First check if we have pending events to emit
+        if let Some(event) = self.pending_events.pop_front() {
+            return Ok(Some(event));
+        }
 
         loop {
             // Add 30-second timeout to keep event loop responsive during quiet periods
@@ -871,6 +867,53 @@ impl WsConnection {
         }
     }
 
+    /// Compute BBO (Best Bid/Offer) from order book state
+    /// Returns (best_bid, best_ask) as strings, or None if book is empty
+    ///
+    /// OPTIMIZATION: Avoids float parsing by treating "0", "0.0", "0.00" etc as zero
+    /// without parsing. Only parses float if needed for comparison.
+    fn compute_bbo_from_book(state: &OrderBookState) -> (Option<String>, Option<String>) {
+        // Find best bid (highest price with size > 0)
+        let best_bid = state
+            .bids
+            .iter()
+            .find_map(|level| {
+                let size_str = level.remaining_base_amount.as_deref().unwrap_or(&level.size);
+                // Fast path: check for common zero representations without parsing
+                if size_str == "0" || size_str == "0.0" || size_str == "0.00" || size_str.is_empty() {
+                    return None;
+                }
+                // Slow path: parse to check if truly > 0
+                let size: f64 = size_str.parse().ok()?;
+                if size > 0.0 {
+                    Some(level.price.clone())
+                } else {
+                    None
+                }
+            });
+
+        // Find best ask (lowest price with size > 0)
+        let best_ask = state
+            .asks
+            .iter()
+            .find_map(|level| {
+                let size_str = level.remaining_base_amount.as_deref().unwrap_or(&level.size);
+                // Fast path: check for common zero representations without parsing
+                if size_str == "0" || size_str == "0.0" || size_str == "0.00" || size_str.is_empty() {
+                    return None;
+                }
+                // Slow path: parse to check if truly > 0
+                let size: f64 = size_str.parse().ok()?;
+                if size > 0.0 {
+                    Some(level.price.clone())
+                } else {
+                    None
+                }
+            });
+
+        (best_bid, best_ask)
+    }
+
     async fn handle_text_message(&mut self, text: String) -> WsResult<Option<WsEvent>> {
         let message: Value = serde_json::from_str(&text)?;
 
@@ -916,7 +959,7 @@ impl WsConnection {
                 let offset = order_book_payload.offset.or(envelope_offset);
 
                 if let Some(code) = payload_code.or(book_code) {
-                    if code != 200 {
+                    if code != 200 && code != 0 {
                         tracing::warn!(market = %market.0, code, "order book snapshot returned non-success code");
                     }
                 }
@@ -928,10 +971,40 @@ impl WsConnection {
                 } else {
                     self.state.order_book_offsets.remove(&market);
                 }
+
+                // If BBO is subscribed for this market, compute and queue synthetic BBO event
+                // OPTIMIZATION: Only emit BBO event if it changed from cached value
+                if self.subscriptions.bbo.contains(&market) {
+                    let (best_bid, best_ask) = Self::compute_bbo_from_book(&snapshot);
+
+                    // Check if BBO changed compared to cache
+                    let bbo_changed = self.state.bbo_cache
+                        .get(&market)
+                        .map(|(cached_bid, cached_ask)| {
+                            cached_bid != &best_bid || cached_ask != &best_ask
+                        })
+                        .unwrap_or(true); // Always emit first BBO
+
+                    if bbo_changed {
+                        // Update cache
+                        self.state.bbo_cache.insert(market, (best_bid.clone(), best_ask.clone()));
+
+                        // Emit BBO event
+                        self.pending_events.push_back(WsEvent::BBO(BBOEvent {
+                            channel: format!("bbo:{}", market.into_inner()),
+                            market_id: market.into_inner() as u32,
+                            best_bid,
+                            best_ask,
+                            timestamp: chrono::Utc::now().timestamp_millis(),
+                        }));
+                    }
+                }
+
                 Ok(Some(WsEvent::OrderBook(OrderBookEvent {
                     market,
                     state: snapshot,
                     delta: None,
+                    nonce: None, // Snapshots don't have nonce
                 })))
             }
             "update/order_book" => {
@@ -943,9 +1016,10 @@ impl WsConnection {
                 let order_book_payload = payload.order_book;
                 let book_code = order_book_payload.code;
                 let offset = order_book_payload.offset.or(envelope_offset);
+                let nonce = order_book_payload.nonce;
 
                 if let Some(code) = payload_code.or(book_code) {
-                    if code != 200 {
+                    if code != 200 && code != 0 {
                         tracing::warn!(market = %market.0, code, "order book delta returned non-success code");
                     }
                 }
@@ -968,10 +1042,40 @@ impl WsConnection {
 
                 if let Some(state) = self.state.order_books.get_mut(&market) {
                     state.apply_delta(&delta);
+
+                    // If BBO is subscribed for this market, compute and queue synthetic BBO event
+                    // OPTIMIZATION: Only emit BBO event if it changed from cached value
+                    if self.subscriptions.bbo.contains(&market) {
+                        let (best_bid, best_ask) = Self::compute_bbo_from_book(state);
+
+                        // Check if BBO changed compared to cache
+                        let bbo_changed = self.state.bbo_cache
+                            .get(&market)
+                            .map(|(cached_bid, cached_ask)| {
+                                cached_bid != &best_bid || cached_ask != &best_ask
+                            })
+                            .unwrap_or(true); // Always emit first BBO
+
+                        if bbo_changed {
+                            // Update cache
+                            self.state.bbo_cache.insert(market, (best_bid.clone(), best_ask.clone()));
+
+                            // Emit BBO event
+                            self.pending_events.push_back(WsEvent::BBO(BBOEvent {
+                                channel: format!("bbo:{}", market.into_inner()),
+                                market_id: market.into_inner() as u32,
+                                best_bid,
+                                best_ask,
+                                timestamp: chrono::Utc::now().timestamp_millis(),
+                            }));
+                        }
+                    }
+
                     Ok(Some(WsEvent::OrderBook(OrderBookEvent {
                         market,
                         state: state.clone(),
                         delta: Some(delta),
+                        nonce,
                     })))
                 } else {
                     tracing::warn!(
@@ -1030,7 +1134,28 @@ impl WsConnection {
             }
             other => {
                 if let Some(snapshot) = classify_account_message(other) {
-                    let event = self.handle_account_message(message, snapshot)?;
+                    let event = self.handle_account_message(message.clone(), snapshot)?;
+
+                    // Check if this is an account_all_positions or account_all_trades event
+                    // that needs to be filtered for market-specific subscriptions
+                    // Note: Responses use colon format like "account_all_positions:{account_id}"
+                    let channel = message.get("channel")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+
+                    let filtered_events = if channel.contains("account_all_positions") {
+                        self.filter_account_positions_by_market(event.clone())
+                    } else if channel.contains("account_all_trades") {
+                        self.filter_account_trades_by_market(event.clone())
+                    } else {
+                        Vec::new()
+                    };
+
+                    // Queue any filtered events
+                    for filtered in filtered_events {
+                        self.pending_events.push_back(WsEvent::Account(filtered));
+                    }
+
                     Ok(Some(WsEvent::Account(event)))
                 } else {
                     Ok(Some(WsEvent::Unknown(text)))
@@ -1062,15 +1187,11 @@ impl WsConnection {
             self.stream.send(Message::Text(payload.to_string())).await?;
         }
 
-        // BBO (Best Bid/Offer)
-        for market in &self.subscriptions.bbo {
-            let payload = json!({
-                "type": "subscribe",
-                "channel": format!("bbo/{}", market.into_inner()),
-            })
-            .to_string();
-            self.stream.send(Message::Text(payload)).await?;
-        }
+        // BBO (Best Bid/Offer) - SYNTHETIC CHANNEL
+        // Note: Lighter doesn't have a real bbo/ channel.
+        // BBO events are computed client-side from order_book updates.
+        // We don't send any subscription here - just track that BBO is requested
+        // and emit synthetic BBO events when order book updates arrive.
 
         // Trades
         for market in &self.subscriptions.trades {
@@ -1092,25 +1213,6 @@ impl WsConnection {
             self.stream.send(Message::Text(payload)).await?;
         }
 
-        // Transactions
-        if self.subscriptions.subscribe_transactions {
-            let payload = json!({
-                "type": "subscribe",
-                "channel": "transaction",
-            })
-            .to_string();
-            self.stream.send(Message::Text(payload)).await?;
-        }
-
-        // Executed transactions
-        if self.subscriptions.subscribe_executed_transactions {
-            let payload = json!({
-                "type": "subscribe",
-                "channel": "executed_transaction",
-            })
-            .to_string();
-            self.stream.send(Message::Text(payload)).await?;
-        }
 
         // Height
         if self.subscriptions.subscribe_height {
@@ -1243,30 +1345,133 @@ impl WsConnection {
         }
 
         // Market-specific account positions - requires authentication
-        for (market, account) in &self.subscriptions.account_market_positions {
-            let mut payload = json!({
-                "type": "subscribe",
-                "channel": format!("account_positions/{}/{}", market.into_inner(), account.into_inner()),
-            });
-            if let Some(token) = &self.auth_token {
-                payload["auth"] = json!(token);
+        // Note: Lighter doesn't have account_positions/{market}/{account} channel.
+        // We subscribe to account_all_positions once per account and filter by market_id in the event handler.
+        let mut subscribed_position_accounts = std::collections::HashSet::new();
+        for (_market, account) in &self.subscriptions.account_market_positions {
+            if subscribed_position_accounts.insert(*account) {
+                let mut payload = json!({
+                    "type": "subscribe",
+                    "channel": format!("account_all_positions/{}", account.into_inner()),
+                });
+                if let Some(token) = &self.auth_token {
+                    payload["auth"] = json!(token);
+                }
+                self.stream.send(Message::Text(payload.to_string())).await?;
             }
-            self.stream.send(Message::Text(payload.to_string())).await?;
         }
 
         // Market-specific account trades - requires authentication
-        for (market, account) in &self.subscriptions.account_market_trades {
-            let mut payload = json!({
-                "type": "subscribe",
-                "channel": format!("account_trades/{}/{}", market.into_inner(), account.into_inner()),
-            });
-            if let Some(token) = &self.auth_token {
-                payload["auth"] = json!(token);
+        // Note: Lighter doesn't have account_trades/{market}/{account} channel.
+        // We subscribe to account_all_trades once per account and filter by market_id in the event handler.
+        let mut subscribed_trade_accounts = std::collections::HashSet::new();
+        for (_market, account) in &self.subscriptions.account_market_trades {
+            if subscribed_trade_accounts.insert(*account) {
+                let mut payload = json!({
+                    "type": "subscribe",
+                    "channel": format!("account_all_trades/{}", account.into_inner()),
+                });
+                if let Some(token) = &self.auth_token {
+                    payload["auth"] = json!(token);
+                }
+                self.stream.send(Message::Text(payload.to_string())).await?;
             }
-            self.stream.send(Message::Text(payload.to_string())).await?;
         }
 
         Ok(())
+    }
+
+    /// Filter account_all_positions events for market-specific subscriptions
+    fn filter_account_positions_by_market(
+        &self,
+        event: AccountEventEnvelope,
+    ) -> Vec<AccountEventEnvelope> {
+        let mut filtered_events = Vec::new();
+
+        // Find all market-specific position subscriptions for this account
+        for (market, account) in &self.subscriptions.account_market_positions {
+            if *account != event.account {
+                continue;
+            }
+
+            // Extract positions data and filter by market_id
+            if let Some(positions) = event.event.as_value().get("positions") {
+                if let Some(positions_obj) = positions.as_object() {
+                    // Check if this market's position exists
+                    let market_key = market.into_inner().to_string();
+                    if let Some(position_data) = positions_obj.get(&market_key) {
+                        // Create filtered event with only this market's position
+                        let mut filtered_value = event.event.as_value().clone();
+                        if let Some(obj) = filtered_value.as_object_mut() {
+                            let mut filtered_positions = serde_json::Map::new();
+                            filtered_positions.insert(market_key, position_data.clone());
+                            obj.insert("positions".to_string(), json!(filtered_positions));
+
+                            // Modify channel to look like it came from market-specific subscription
+                            obj.insert(
+                                "channel".to_string(),
+                                json!(format!("account_positions/{}/{}", market.into_inner(), account.into_inner()))
+                            );
+                        }
+
+                        filtered_events.push(AccountEventEnvelope {
+                            account: event.account,
+                            snapshot: event.snapshot,
+                            event: AccountEvent::new(filtered_value),
+                        });
+                    }
+                }
+            }
+        }
+
+        filtered_events
+    }
+
+    /// Filter account_all_trades events for market-specific subscriptions
+    fn filter_account_trades_by_market(
+        &self,
+        event: AccountEventEnvelope,
+    ) -> Vec<AccountEventEnvelope> {
+        let mut filtered_events = Vec::new();
+
+        // Find all market-specific trade subscriptions for this account
+        for (market, account) in &self.subscriptions.account_market_trades {
+            if *account != event.account {
+                continue;
+            }
+
+            // Extract trades - API returns {"trades": {"{MARKET_INDEX}": [Trade]}}
+            if let Some(trades) = event.event.as_value().get("trades") {
+                let market_key = market.into_inner().to_string();
+
+                // Check if trades is an object (keyed by market_id)
+                if let Some(trades_obj) = trades.as_object() {
+                    if let Some(market_trades) = trades_obj.get(&market_key) {
+                        // Create filtered event with only this market's trades
+                        let mut filtered_value = event.event.as_value().clone();
+                        if let Some(obj) = filtered_value.as_object_mut() {
+                            let mut filtered_trades_obj = serde_json::Map::new();
+                            filtered_trades_obj.insert(market_key.clone(), market_trades.clone());
+                            obj.insert("trades".to_string(), json!(filtered_trades_obj));
+
+                            // Modify channel to look like it came from market-specific subscription
+                            obj.insert(
+                                "channel".to_string(),
+                                json!(format!("account_trades/{}/{}", market.into_inner(), account.into_inner()))
+                            );
+                        }
+
+                        filtered_events.push(AccountEventEnvelope {
+                            account: event.account,
+                            snapshot: event.snapshot,
+                            event: AccountEvent::new(filtered_value),
+                        });
+                    }
+                }
+            }
+        }
+
+        filtered_events
     }
 
     fn handle_account_message(
@@ -1293,7 +1498,6 @@ impl WsConnection {
             event,
         })
     }
-
 }
 
 pub struct WsStream {
@@ -1359,6 +1563,9 @@ pub struct OrderBookEvent {
     pub market: MarketId,
     pub state: OrderBookState,
     pub delta: Option<OrderBookDelta>,
+    /// Nonce for order book updates (Premium feature)
+    /// Increments with each update. Use to detect missed or out-of-order messages.
+    pub nonce: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1371,6 +1578,13 @@ pub struct AccountEventEnvelope {
 #[derive(Debug, Clone)]
 pub struct AccountEvent(Value);
 
+/// Trade side from account perspective
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradeSide {
+    Buy,
+    Sell,
+}
+
 impl AccountEvent {
     pub fn new(value: Value) -> Self {
         Self(value)
@@ -1382,6 +1596,56 @@ impl AccountEvent {
 
     pub fn as_value(&self) -> &Value {
         &self.0
+    }
+
+    /// Helper to determine trade side for a specific account
+    ///
+    /// For account_all_trades events, determines if the account was buying or selling.
+    /// Returns None if the trade doesn't involve the given account.
+    pub fn trade_side_for_account(&self, trade: &Value, account: AccountId) -> Option<TradeSide> {
+        let ask_account = trade.get("ask_account_id")?.as_i64()? as i64;
+        let bid_account = trade.get("bid_account_id")?.as_i64()? as i64;
+        let account_id = account.into_inner() as i64;
+
+        if ask_account == account_id {
+            Some(TradeSide::Sell)
+        } else if bid_account == account_id {
+            Some(TradeSide::Buy)
+        } else {
+            None
+        }
+    }
+
+    /// Helper to get all trades from account_all_trades event filtered by market
+    ///
+    /// Returns iterator of (market_id, trade_array) pairs
+    pub fn get_trades_by_market(&self) -> Option<Vec<(String, &Value)>> {
+        let trades = self.0.get("trades")?;
+        let trades_obj = trades.as_object()?;
+
+        Some(
+            trades_obj
+                .iter()
+                .map(|(market_id, trades_array)| (market_id.clone(), trades_array))
+                .collect()
+        )
+    }
+
+    /// Helper to get position for a specific market from account_all_positions event
+    pub fn get_position_for_market(&self, market_id: i32) -> Option<&Value> {
+        let positions = self.0.get("positions")?;
+        let positions_obj = positions.as_object()?;
+        positions_obj.get(&market_id.to_string())
+    }
+
+    /// Helper to parse position side
+    pub fn position_side(position: &Value) -> Option<&str> {
+        let sign = position.get("sign")?.as_i64()?;
+        Some(match sign {
+            s if s > 0 => "LONG",
+            s if s < 0 => "SHORT",
+            _ => "FLAT",
+        })
     }
 }
 
@@ -1404,6 +1668,10 @@ struct OrderBookPayload {
     offset: Option<i64>,
     #[serde(default)]
     code: Option<i32>,
+    /// Nonce for order book updates (Premium feature)
+    /// Used to detect missed or out-of-order updates
+    #[serde(default)]
+    nonce: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1519,6 +1787,10 @@ pub struct TransactionData {
     pub executed_at: i64,
     pub sequence_index: i64,
     pub parent_hash: String,
+    /// Remaining daily volume quota after this transaction (in USD)
+    /// Used to track and enforce daily trading volume limits
+    #[serde(default)]
+    pub volume_quota_remaining: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1605,6 +1877,48 @@ pub struct BBOEvent {
     pub best_bid: Option<String>,
     pub best_ask: Option<String>,
     pub timestamp: i64,
+}
+
+impl BBOEvent {
+    /// Parse best bid as f64
+    pub fn bid_f64(&self) -> Option<f64> {
+        self.best_bid
+            .as_ref()
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+    }
+
+    /// Parse best ask as f64
+    pub fn ask_f64(&self) -> Option<f64> {
+        self.best_ask
+            .as_ref()
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+    }
+
+    /// Calculate spread (ask - bid)
+    pub fn spread(&self) -> Option<f64> {
+        match (self.bid_f64(), self.ask_f64()) {
+            (Some(bid), Some(ask)) if bid > 0.0 && ask > bid => Some(ask - bid),
+            _ => None,
+        }
+    }
+
+    /// Calculate mid price ((bid + ask) / 2)
+    pub fn mid_price(&self) -> Option<f64> {
+        match (self.bid_f64(), self.ask_f64()) {
+            (Some(bid), Some(ask)) if bid > 0.0 && ask > bid => Some((bid + ask) / 2.0),
+            _ => None,
+        }
+    }
+
+    /// Calculate spread in basis points relative to mid price
+    pub fn spread_bps(&self) -> Option<f64> {
+        match (self.spread(), self.mid_price()) {
+            (Some(spread), Some(mid)) if mid > 0.0 => Some((spread / mid) * 10_000.0),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

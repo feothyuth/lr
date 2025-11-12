@@ -79,8 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let event_data = account_event.event.as_value();
 
                 // Try to extract positions from the event
-                if let Some(positions_obj) =
-                    event_data.get("positions").and_then(|v| v.as_object())
+                if let Some(positions_obj) = event_data.get("positions").and_then(|v| v.as_object())
                 {
                     for (market_key, pos_value) in positions_obj {
                         let market_id = pos_value
@@ -89,13 +88,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .map(|v| v as i32)
                             .or_else(|| market_key.parse().ok());
 
-                        let pos_size = pos_value
-                            .get("position")
-                            .and_then(|v| {
-                                v.as_str()
-                                    .and_then(|s| s.parse::<f64>().ok())
-                                    .or_else(|| v.as_f64())
-                            });
+                        let pos_size = pos_value.get("position").and_then(|v| {
+                            v.as_str()
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .or_else(|| v.as_f64())
+                        });
 
                         let sign_opt = pos_value
                             .get("sign")

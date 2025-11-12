@@ -119,7 +119,6 @@ async fn main() -> Result<()> {
         .ws()
         .subscribe_order_book(MarketId::new(MARKET_ID))
         .subscribe_market_stats(MarketId::new(MARKET_ID))
-        .subscribe_transactions() // CRITICAL: Need this to submit orders via WebSocket
         .subscribe_account_all_orders(AccountId::new(account_index))
         .connect()
         .await
@@ -140,7 +139,6 @@ async fn main() -> Result<()> {
                 .ws()
                 .subscribe_order_book(MarketId::new(MARKET_ID))
                 .subscribe_market_stats(MarketId::new(MARKET_ID))
-                .subscribe_transactions()
                 .subscribe_account_all_orders(AccountId::new(account_index))
                 .connect()
                 .await
@@ -215,10 +213,39 @@ async fn main() -> Result<()> {
                                 continue;
                             }
 
-                            let top_bid_str = ob.state.bids[0].price.clone();
-                            let top_ask_str = ob.state.asks[0].price.clone();
-                            let raw_best_bid = parse_price(&top_bid_str)?;
-                            let raw_best_ask = parse_price(&top_ask_str)?;
+                            // Skip zero-size orders (cancelled/filled)
+                            let (top_bid_str, raw_best_bid) = match ob.state.bids.iter().find_map(|level| {
+                                let size_str = level.remaining_base_amount.as_deref().unwrap_or(&level.size);
+                                if size_str == "0" || size_str == "0.0" || size_str == "0.00" || size_str.is_empty() {
+                                    return None;
+                                }
+                                let size: f64 = size_str.parse().ok()?;
+                                if size > 0.0 {
+                                    let price = parse_price(&level.price).ok()?;
+                                    Some((level.price.clone(), price))
+                                } else {
+                                    None
+                                }
+                            }) {
+                                Some(result) => result,
+                                None => continue,
+                            };
+                            let (top_ask_str, raw_best_ask) = match ob.state.asks.iter().find_map(|level| {
+                                let size_str = level.remaining_base_amount.as_deref().unwrap_or(&level.size);
+                                if size_str == "0" || size_str == "0.0" || size_str == "0.00" || size_str.is_empty() {
+                                    return None;
+                                }
+                                let size: f64 = size_str.parse().ok()?;
+                                if size > 0.0 {
+                                    let price = parse_price(&level.price).ok()?;
+                                    Some((level.price.clone(), price))
+                                } else {
+                                    None
+                                }
+                            }) {
+                                Some(result) => result,
+                                None => continue,
+                            };
                             log_action(&format!(
                                 "raw top-of-book strings bid={} ask={} | parsed bid={:.4} ask={:.4}",
                                 top_bid_str, top_ask_str, raw_best_bid, raw_best_ask
