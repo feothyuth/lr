@@ -514,6 +514,8 @@ impl<'a> DynamicGridBot<'a> {
                             if let Some(arr) = market_trades_value.as_array() {
                                 println!("  ✅ Found {} trades", arr.len());
 
+                                let mut handled_fill = false;
+
                                 for trade in arr {
                                     // Get trade_id first (unique identifier)
                                     let trade_id = match trade.get("trade_id").and_then(|v| v.as_i64()) {
@@ -575,20 +577,28 @@ impl<'a> DynamicGridBot<'a> {
                                             self.resetting_grid = false;
                                             result?;
 
-                                            // Process any queued fills
-                                            while let Some(queued_fill) = self.pending_fills.pop_front() {
-                                                println!("📤 Processing queued fill: {} {:.6} @ ${:.2}",
-                                                    queued_fill.side, queued_fill.size, queued_fill.price);
-                                                self.last_fill_price = Some(queued_fill.price);
-                                                self.resetting_grid = true;
-                                                let result = self.reset_after_fill(&queued_fill, connection).await;
-                                                self.resetting_grid = false;
-                                                result?;
-                                            }
-
-                                            return Ok(());
+                                            handled_fill = true;
                                         }
                                     }
+                                }
+
+                                if handled_fill {
+                                    // Process any queued fills after finishing this snapshot
+                                    while let Some(queued_fill) = self.pending_fills.pop_front() {
+                                        println!(
+                                            "📤 Processing queued fill: {} {:.6} @ ${:.2}",
+                                            queued_fill.side, queued_fill.size, queued_fill.price
+                                        );
+                                        self.last_fill_price = Some(queued_fill.price);
+                                        self.resetting_grid = true;
+                                        let result = self
+                                            .reset_after_fill(&queued_fill, connection)
+                                            .await;
+                                        self.resetting_grid = false;
+                                        result?;
+                                    }
+
+                                    return Ok(());
                                 }
                             }
                         }
