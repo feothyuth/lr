@@ -100,12 +100,13 @@ async fn main() -> Result<()> {
         .await?;
     println!("✅ Trade stream connected");
 
-    // 4. Account stream (orders + trades) - authenticated
+    // 4. Account stream (orders + trades + positions) - authenticated
     let (mut account_stream, _) = connect_private_stream(
         &ctx,
         ctx.ws_builder()
             .subscribe_account_market_trades(market, account)
             .subscribe_account_all_orders(account)
+            .subscribe_account_all_positions(account)
     ).await?;
     println!("✅ Account stream connected (authenticated)");
 
@@ -388,7 +389,8 @@ struct DynamicGridBot<'a> {
     last_mark_price: f64,  // Mark price from market stats
     last_trade: f64,       // Last market trade price
     last_fill_price: Option<f64>,  // Last actual fill of our orders
-    last_processed_fill: Option<(f64, f64)>,  // (price, size) to detect duplicates
+    processed_trade_ids: HashSet<i64>,  // Track processed trade IDs to prevent duplicates
+    pending_fills: VecDeque<FillEvent>,  // Queue fills during grid reset
     base_qty_units: i64,
     next_client_id: i64,
     order_tracker: OrderTracker,
@@ -452,7 +454,8 @@ impl<'a> DynamicGridBot<'a> {
             next_client_id,
             order_tracker: OrderTracker::default(),
             latest_order_book: None,
-            last_processed_fill: None,
+            processed_trade_ids: HashSet::new(),
+            pending_fills: VecDeque::new(),
             resetting_grid: false,
         })
     }
@@ -494,12 +497,6 @@ impl<'a> DynamicGridBot<'a> {
                     return Ok(());
                 }
 
-                // Skip if we're already resetting the grid
-                if self.resetting_grid {
-                    println!("⏸️  Already resetting grid, skipping");
-                    return Ok(());
-                }
-
                 // Parse trades from SDK-filtered event
                 let raw_json = envelope.event.into_inner();
 
@@ -518,6 +515,21 @@ impl<'a> DynamicGridBot<'a> {
                                 println!("  ✅ Found {} trades", arr.len());
 
                                 for trade in arr {
+                                    // Get trade_id first (unique identifier)
+                                    let trade_id = match trade.get("trade_id").and_then(|v| v.as_i64()) {
+                                        Some(id) => id,
+                                        None => {
+                                            println!("⚠️  Trade missing trade_id, skipping");
+                                            continue;
+                                        }
+                                    };
+
+                                    // Check if already processed
+                                    if self.processed_trade_ids.contains(&trade_id) {
+                                        println!("⏭️  Trade {} already processed, skipping", trade_id);
+                                        continue;
+                                    }
+
                                     // Get trade details
                                     if let (Some(price_str), Some(size_str), Some(bid_account), Some(ask_account)) =
                                         (trade.get("price").and_then(|v| v.as_str()),
@@ -538,27 +550,42 @@ impl<'a> DynamicGridBot<'a> {
                                                 continue; // Not our trade
                                             };
 
-                                            // Check if this is a duplicate fill
-                                            if let Some((last_price, last_size)) = self.last_processed_fill {
-                                                if (price - last_price).abs() < 0.01 && (size - last_size).abs() < 0.000001 {
-                                                    continue;
-                                                }
-                                            }
-
-                                            println!("💥 Fill detected: {} {:.6} @ ${:.2}", side, size, price);
-
-                                            self.last_fill_price = Some(price);
-                                            self.last_processed_fill = Some((price, size));
-                                            self.resetting_grid = true;
+                                            // Mark as processed
+                                            self.processed_trade_ids.insert(trade_id);
 
                                             let fill = FillEvent {
                                                 price,
                                                 size,
                                                 side: side.to_string(),
                                             };
+
+                                            // If resetting, queue the fill instead of dropping it
+                                            if self.resetting_grid {
+                                                println!("📥 Fill queued (grid resetting): {} {:.6} @ ${:.2}", side, size, price);
+                                                self.pending_fills.push_back(fill);
+                                                continue;
+                                            }
+
+                                            println!("💥 Fill detected: {} {:.6} @ ${:.2}", side, size, price);
+
+                                            self.last_fill_price = Some(price);
+                                            self.resetting_grid = true;
+
                                             let result = self.reset_after_fill(&fill, connection).await;
                                             self.resetting_grid = false;
                                             result?;
+
+                                            // Process any queued fills
+                                            while let Some(queued_fill) = self.pending_fills.pop_front() {
+                                                println!("📤 Processing queued fill: {} {:.6} @ ${:.2}",
+                                                    queued_fill.side, queued_fill.size, queued_fill.price);
+                                                self.last_fill_price = Some(queued_fill.price);
+                                                self.resetting_grid = true;
+                                                let result = self.reset_after_fill(&queued_fill, connection).await;
+                                                self.resetting_grid = false;
+                                                result?;
+                                            }
+
                                             return Ok(());
                                         }
                                     }
