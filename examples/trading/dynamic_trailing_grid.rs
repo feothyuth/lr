@@ -30,8 +30,8 @@ use lighter_client::{
     trading_helpers::{calculate_grid_levels, scale_price_to_int, scale_size_to_int},
     transactions::CreateOrder,
     tx_executor::send_batch_tx_ws,
-    types::MarketId,
-    ws_client::{AccountEventEnvelope, OrderBookEvent, TradeSide, WsConnection, WsEvent},
+    types::{AccountId, MarketId},
+    ws_client::{AccountEventEnvelope, OrderBookEvent, TradeSide, WsConnection, WsEvent, WsStream},
 };
 use serde_json::Value;
 use std::{
@@ -101,13 +101,8 @@ async fn main() -> Result<()> {
     println!("✅ Trade stream connected");
 
     // 4. Account stream (orders + trades + positions) - authenticated
-    let (mut account_stream, _) = connect_private_stream(
-        &ctx,
-        ctx.ws_builder()
-            .subscribe_account_market_trades(market, account)
-            .subscribe_account_all_orders(account)
-            .subscribe_account_all_positions(account)
-    ).await?;
+    let mut account_stream =
+        connect_account_stream_with_handshake(&ctx, market, account).await?;
     println!("✅ Account stream connected (authenticated)");
 
     // 5. Transaction stream - authenticated, separate connection for sending/monitoring txs
@@ -117,7 +112,7 @@ async fn main() -> Result<()> {
 
     // Wait for all streams to complete handshake
     println!("⏳ Waiting for all WebSocket handshakes to complete...");
-    let mut handshakes_complete = 0;
+    let mut handshakes_complete = 1; // account stream already awaited connected
 
     // Wait for each stream's Connected event
     while let Some(event) = order_book_stream.next().await {
@@ -135,13 +130,6 @@ async fn main() -> Result<()> {
     }
 
     while let Some(event) = trade_stream.next().await {
-        if matches!(event?, WsEvent::Connected) {
-            handshakes_complete += 1;
-            break;
-        }
-    }
-
-    while let Some(event) = account_stream.next().await {
         if matches!(event?, WsEvent::Connected) {
             handshakes_complete += 1;
             break;
@@ -244,8 +232,18 @@ async fn main() -> Result<()> {
                         }
                     }
                     Some(Err(err)) => {
-                        eprintln!("❌ Account stream error: {err}");
-                        return Err(err.into());
+                        eprintln!("❌ Account stream error: {err}; reconnecting…");
+                        match connect_account_stream_with_handshake(&ctx, market, account).await {
+                            Ok(new_stream) => {
+                                account_stream = new_stream;
+                                println!("✅ Account stream reconnected");
+                                continue;
+                            }
+                            Err(reconnect_err) => {
+                                eprintln!("❌ Failed to reconnect account stream: {reconnect_err}");
+                                return Err(reconnect_err);
+                            }
+                        }
                     }
                     None => {
                         println!("🔌 Account stream closed");
@@ -376,6 +374,34 @@ fn env_f64(key: &str, default: f64) -> f64 {
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(default)
+}
+
+async fn connect_account_stream_with_handshake(
+    ctx: &ExampleContext,
+    market: MarketId,
+    account: AccountId,
+) -> Result<WsStream> {
+    let (mut stream, _) = connect_private_stream(
+        ctx,
+        ctx.ws_builder()
+            .subscribe_account_market_trades(market, account)
+            .subscribe_account_all_orders(account)
+            .subscribe_account_all_positions(account),
+    )
+    .await?;
+    wait_for_connected(&mut stream).await?;
+    Ok(stream)
+}
+
+async fn wait_for_connected(stream: &mut WsStream) -> Result<()> {
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(WsEvent::Connected) => return Ok(()),
+            Ok(_) => continue,
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Err(anyhow!("stream closed before Connected event"))
 }
 
 // === Bot implementation ======================================================
