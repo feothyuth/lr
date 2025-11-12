@@ -1,0 +1,6 @@
+# Require review from repo owner for sensitive areas.
+# Replace @feothyuth with the correct GitHub handle(s) for your team.
+src/crypto/ @feothyuth
+src/orders/ @feothyuth
+examples/ @feothyuth
+.github/workflows/ @feothyuth
