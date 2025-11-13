@@ -211,7 +211,7 @@ async fn main() -> Result<()> {
             order_event = order_book_stream.next() => {
                 match order_event {
                     Some(Ok(event)) => {
-                        println!("📊 Order book event: {}", event_label(&event));
+                        // Removed: println!("📊 Order book event: {}", event_label(&event));
                         last_order_message = Instant::now();
                         if let Err(err) = bot.handle_event(event, &mut tx_connection).await {
                             eprintln!("⚠️  Order book handler error: {err:#}");
@@ -232,7 +232,7 @@ async fn main() -> Result<()> {
             stats_event = market_stats_stream.next() => {
                 match stats_event {
                     Some(Ok(event)) => {
-                        println!("📈 Market stats event: {}", event_label(&event));
+                        // Removed: println!("📈 Market stats event: {}", event_label(&event));
                         last_stats_message = Instant::now();
                         if let Err(err) = bot.handle_event(event, &mut tx_connection).await {
                             eprintln!("⚠️  Market stats handler error: {err:#}");
@@ -253,7 +253,7 @@ async fn main() -> Result<()> {
             trade_event = trade_stream.next() => {
                 match trade_event {
                     Some(Ok(event)) => {
-                        println!("💱 Trade event: {}", event_label(&event));
+                        // Removed: println!("💱 Trade event: {}", event_label(&event));
                         last_trade_message = Instant::now();
                         if let Err(err) = bot.handle_event(event, &mut tx_connection).await {
                             eprintln!("⚠️  Trade handler error: {err:#}");
@@ -660,8 +660,7 @@ impl<'a> DynamicGridBot<'a> {
     }
 
     async fn handle_event(&mut self, event: WsEvent, connection: &mut WsConnection) -> Result<()> {
-        // DEBUG: Log ALL events
-        println!("🔔 Event: {}", event_label(&event));
+        // Removed excessive logging: println!("🔔 Event: {}", event_label(&event));
 
         match event {
             WsEvent::OrderBook(book_event) => {
@@ -703,9 +702,10 @@ impl<'a> DynamicGridBot<'a> {
                 self.update_position_from_snapshot(&raw_json);
                 self.update_active_orders(&raw_json);
 
-                println!("📄 Raw event JSON:");
-                println!("{}\n", serde_json::to_string_pretty(&raw_json)
-                    .unwrap_or_else(|_| "parse error".to_string()));
+                // Removed verbose JSON logging for cleaner output
+                // println!("📄 Raw event JSON:");
+                // println!("{}\n", serde_json::to_string_pretty(&raw_json)
+                //     .unwrap_or_else(|_| "parse error".to_string()));
 
                 // Extract trades - SDK returns {"trades": {"{MARKET_INDEX}": [Trade]}}
                 if let Some(trades_value) = raw_json.get("trades") {
