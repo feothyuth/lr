@@ -31,7 +31,7 @@ use lighter_client::{
     transactions::CreateOrder,
     tx_executor::send_batch_tx_ws,
     types::{AccountId, MarketId},
-    ws_client::{AccountEventEnvelope, OrderBookEvent, TradeSide, WsConnection, WsEvent, WsStream},
+    ws_client::{AccountEventEnvelope, OrderBookEvent, WsConnection, WsEvent, WsStream},
 };
 use serde_json::Value;
 use std::{
@@ -123,8 +123,14 @@ async fn main() -> Result<()> {
     let mut heartbeat = interval(Duration::from_secs(30));
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-    println!("🔁 DEBUG: Entering main event loop");
-    loop {
+    let mut generation = 0usize;
+    println!("🔁 DEBUG: Entering main event loop with outer recovery");
+
+    'outer: loop {
+        generation += 1;
+        println!("🔁 Generation #{generation} running");
+
+        'event_loop: loop {
         tokio::select! {
             _ = order_watchdog.tick() => {
                 if Instant::now().duration_since(last_order_message) > STREAM_IDLE_LIMIT {
@@ -135,7 +141,8 @@ async fn main() -> Result<()> {
                             last_order_message = Instant::now();
                         }
                         Err(err) => {
-                            return Err(anyhow!("Failed to reconnect order-book stream: {err}"));
+                            eprintln!("❌ Failed to reconnect order-book stream: {err}");
+                            break 'event_loop;
                         }
                     }
                 }
@@ -149,7 +156,8 @@ async fn main() -> Result<()> {
                             last_stats_message = Instant::now();
                         }
                         Err(err) => {
-                            return Err(anyhow!("Failed to reconnect market-stats stream: {err}"));
+                            eprintln!("❌ Failed to reconnect market-stats stream: {err}");
+                            break 'event_loop;
                         }
                     }
                 }
@@ -163,7 +171,8 @@ async fn main() -> Result<()> {
                             last_trade_message = Instant::now();
                         }
                         Err(err) => {
-                            return Err(anyhow!("Failed to reconnect trade stream: {err}"));
+                            eprintln!("❌ Failed to reconnect trade stream: {err}");
+                            break 'event_loop;
                         }
                     }
                 }
@@ -177,7 +186,8 @@ async fn main() -> Result<()> {
                             last_account_message = Instant::now();
                         }
                         Err(err) => {
-                            return Err(anyhow!("Failed to reconnect account stream: {err}"));
+                            eprintln!("❌ Failed to reconnect account stream: {err}");
+                            break 'event_loop;
                         }
                     }
                 }
@@ -191,7 +201,8 @@ async fn main() -> Result<()> {
                             last_tx_message = Instant::now();
                         }
                         Err(err) => {
-                            return Err(anyhow!("Failed to reconnect tx stream: {err}"));
+                            eprintln!("❌ Failed to reconnect tx stream: {err}");
+                            break 'event_loop;
                         }
                     }
                 }
@@ -207,12 +218,12 @@ async fn main() -> Result<()> {
                         }
                     }
                     Some(Err(err)) => {
-                        eprintln!("❌ Order book stream error: {err}");
-                        return Err(err.into());
+                        eprintln!("❌ Order book stream error: {err}; breaking to rebuild");
+                        break 'event_loop;
                     }
                     None => {
-                        println!("🔌 Order book stream closed");
-                        break;
+                        println!("🔌 Order book stream closed; breaking to rebuild");
+                        break 'event_loop;
                     }
                 }
             }
@@ -228,12 +239,12 @@ async fn main() -> Result<()> {
                         }
                     }
                     Some(Err(err)) => {
-                        eprintln!("❌ Market stats stream error: {err}");
-                        return Err(err.into());
+                        eprintln!("❌ Market stats stream error: {err}; breaking to rebuild");
+                        break 'event_loop;
                     }
                     None => {
-                        println!("🔌 Market stats stream closed");
-                        break;
+                        println!("🔌 Market stats stream closed; breaking to rebuild");
+                        break 'event_loop;
                     }
                 }
             }
@@ -249,12 +260,12 @@ async fn main() -> Result<()> {
                         }
                     }
                     Some(Err(err)) => {
-                        eprintln!("❌ Trade stream error: {err}");
-                        return Err(err.into());
+                        eprintln!("❌ Trade stream error: {err}; breaking to rebuild");
+                        break 'event_loop;
                     }
                     None => {
-                        println!("🔌 Trade stream closed");
-                        break;
+                        println!("🔌 Trade stream closed; breaking to rebuild");
+                        break 'event_loop;
                     }
                 }
             }
@@ -270,34 +281,12 @@ async fn main() -> Result<()> {
                         }
                     }
                     Some(Err(err)) => {
-                        eprintln!("❌ Account stream error: {err}; reconnecting…");
-                        match connect_account_stream_with_handshake(&ctx, market, account).await {
-                            Ok(new_stream) => {
-                                account_stream = new_stream;
-                                last_account_message = Instant::now();
-                                println!("✅ Account stream reconnected");
-                                continue;
-                            }
-                            Err(reconnect_err) => {
-                                eprintln!("❌ Failed to reconnect account stream: {reconnect_err}");
-                                return Err(reconnect_err);
-                            }
-                        }
+                        eprintln!("❌ Account stream error: {err}; breaking to rebuild");
+                        break 'event_loop;
                     }
                     None => {
-                        println!("🔌 Account stream closed; reconnecting…");
-                        match connect_account_stream_with_handshake(&ctx, market, account).await {
-                            Ok(new_stream) => {
-                                account_stream = new_stream;
-                                last_account_message = Instant::now();
-                                println!("✅ Account stream reconnected");
-                                continue;
-                            }
-                            Err(reconnect_err) => {
-                                eprintln!("❌ Failed to reconnect account stream: {reconnect_err}");
-                                return Err(reconnect_err);
-                            }
-                        }
+                        println!("🔌 Account stream closed; breaking to rebuild");
+                        break 'event_loop;
                     }
                 }
             }
@@ -310,39 +299,20 @@ async fn main() -> Result<()> {
                         last_tx_message = Instant::now();
                         match event {
                             WsEvent::Connected => println!("📤 Tx stream reconnected"),
-                            WsEvent::Pong => {}
+                            WsEvent::Pong => {
+                                // Update timestamp on Pong to prevent false idle detection
+                                last_tx_message = Instant::now();
+                            }
                             other => println!("📤 Tx event: {:?}", other),
                         }
                     }
                     Ok(None) => {
-                        println!("🔌 Transaction connection closed; reconnecting…");
-                        match connect_tx_connection(&ctx, account).await {
-                            Ok(new_conn) => {
-                                tx_connection = new_conn;
-                                last_tx_message = Instant::now();
-                                println!("✅ Transaction connection re-established");
-                                continue;
-                            }
-                            Err(err) => {
-                                eprintln!("❌ Failed to reconnect transaction connection: {err}");
-                                return Err(err);
-                            }
-                        }
+                        println!("🔌 Transaction connection closed; breaking to rebuild");
+                        break 'event_loop;
                     }
                     Err(err) => {
-                        eprintln!("❌ Transaction stream error: {err}; reconnecting…");
-                        match connect_tx_connection(&ctx, account).await {
-                            Ok(new_conn) => {
-                                tx_connection = new_conn;
-                                last_tx_message = Instant::now();
-                                println!("✅ Transaction connection re-established");
-                                continue;
-                            }
-                            Err(reconnect_err) => {
-                                eprintln!("❌ Failed to reconnect transaction connection: {reconnect_err}");
-                                return Err(reconnect_err);
-                            }
-                        }
+                        eprintln!("❌ Transaction stream error: {err}; breaking to rebuild");
+                        break 'event_loop;
                     }
                 }
             }
@@ -368,9 +338,80 @@ async fn main() -> Result<()> {
                 );
             }
         }
-    }
+        }  // End of 'event_loop
 
-    Ok(())
+        // Recovery: rebuild all sockets after event loop break
+        println!("⚠️  Event loop exited - attempting to rebuild all sockets...");
+        sleep(Duration::from_secs(2)).await;
+
+        // Recreate all 5 WebSocket connections
+        println!("🔄 Rebuilding order book stream...");
+        order_book_stream = match connect_order_book_stream(&ctx, market).await {
+            Ok(s) => s,
+            Err(err) => {
+                eprintln!("❌ Failed to rebuild order book stream: {err}");
+                sleep(Duration::from_secs(5)).await;
+                continue 'outer;
+            }
+        };
+
+        println!("🔄 Rebuilding market stats stream...");
+        market_stats_stream = match connect_market_stats_stream(&ctx, market).await {
+            Ok(s) => s,
+            Err(err) => {
+                eprintln!("❌ Failed to rebuild market stats stream: {err}");
+                sleep(Duration::from_secs(5)).await;
+                continue 'outer;
+            }
+        };
+
+        println!("🔄 Rebuilding trade stream...");
+        trade_stream = match connect_trade_stream(&ctx, market).await {
+            Ok(s) => s,
+            Err(err) => {
+                eprintln!("❌ Failed to rebuild trade stream: {err}");
+                sleep(Duration::from_secs(5)).await;
+                continue 'outer;
+            }
+        };
+
+        println!("🔄 Rebuilding account stream...");
+        account_stream = match connect_account_stream_with_handshake(&ctx, market, account).await {
+            Ok(s) => s,
+            Err(err) => {
+                eprintln!("❌ Failed to rebuild account stream: {err}");
+                sleep(Duration::from_secs(5)).await;
+                continue 'outer;
+            }
+        };
+
+        println!("🔄 Rebuilding transaction connection...");
+        tx_connection = match connect_tx_connection(&ctx, account).await {
+            Ok(conn) => conn,
+            Err(err) => {
+                eprintln!("❌ Failed to rebuild tx connection: {err}");
+                sleep(Duration::from_secs(5)).await;
+                continue 'outer;
+            }
+        };
+
+        // Reset all watchdog timestamps
+        let now = Instant::now();
+        last_order_message = now;
+        last_stats_message = now;
+        last_trade_message = now;
+        last_account_message = now;
+        last_tx_message = now;
+
+        // Reset watchdog intervals to prevent immediate firing
+        order_watchdog.reset();
+        stats_watchdog.reset();
+        trade_watchdog.reset();
+        account_watchdog.reset();
+        tx_watchdog.reset();
+
+        println!("✅ All sockets rebuilt successfully - restarting generation #{}", generation);
+    }  // End of 'outer loop - unreachable in normal operation
 }
 
 // === Configuration & helpers =================================================
@@ -467,14 +508,23 @@ async fn connect_account_stream_with_handshake(
 }
 
 async fn wait_for_connected(stream: &mut WsStream) -> Result<()> {
-    while let Some(event) = stream.next().await {
-        match event {
-            Ok(WsEvent::Connected) => return Ok(()),
-            Ok(_) => continue,
-            Err(err) => return Err(err.into()),
+    use tokio::time::timeout;
+
+    match timeout(Duration::from_secs(30), async {
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(WsEvent::Connected) => return Ok::<(), anyhow::Error>(()),
+                Ok(_) => continue,
+                Err(err) => return Err(err.into()),
+            }
         }
+        Err(anyhow!("stream closed before Connected event"))
+    })
+    .await
+    {
+        Ok(inner_result) => inner_result,
+        Err(_) => Err(anyhow!("Timeout waiting for Connected event after 30s")),
     }
-    Err(anyhow!("stream closed before Connected event"))
 }
 
 async fn connect_tx_connection(
@@ -518,8 +568,8 @@ async fn connect_trade_stream(ctx: &ExampleContext, market: MarketId) -> Result<
 
 // Maximum trade IDs to cache (prevents unbounded memory growth)
 const MAX_TRADE_IDS: usize = 50_000;
-const STREAM_IDLE_LIMIT: Duration = Duration::from_secs(12);
-const WATCHDOG_TICK_MS: u64 = 500;
+const STREAM_IDLE_LIMIT: Duration = Duration::from_secs(25);
+const WATCHDOG_TICK_MS: u64 = 1000;
 
 struct DynamicGridBot<'a> {
     ctx: &'a ExampleContext,
