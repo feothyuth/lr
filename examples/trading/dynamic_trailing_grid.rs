@@ -303,7 +303,51 @@ async fn main() -> Result<()> {
                                 // Update timestamp on Pong to prevent false idle detection
                                 last_tx_message = Instant::now();
                             }
-                            other => println!("📤 Tx event: {:?}", other),
+                            WsEvent::Account(envelope) => {
+                                // Check for volume quota in transaction responses
+                                let raw_json = envelope.event.into_inner();
+                                if let Some(txs_value) = raw_json.get("txs") {
+                                    if let Some(txs_array) = txs_value.as_array() {
+                                        for tx in txs_array {
+                                            if let Some(quota) = tx.get("volume_quota_remaining") {
+                                                if let Some(remaining) = quota.as_f64() {
+                                                    println!("💰 Volume quota remaining: ${:.2}", remaining);
+
+                                                    // Warning if quota is getting low
+                                                    if remaining < 1000.0 {
+                                                        eprintln!("⚠️  WARNING: Low volume quota (${:.2} remaining)!", remaining);
+                                                    }
+
+                                                    // Critical if quota is very low - pause trading
+                                                    if remaining < 100.0 {
+                                                        eprintln!("🛑 CRITICAL: Volume quota critically low (${:.2})! Pausing for 60 seconds...", remaining);
+                                                        tokio::time::sleep(Duration::from_secs(60)).await;
+                                                    }
+                                                }
+                                            }
+
+                                            // Check for rate limit errors
+                                            if let Some(error_obj) = tx.get("error") {
+                                                if let Some(msg) = error_obj.get("message").and_then(|m| m.as_str()) {
+                                                    if msg.contains("Too Many Requests") || msg.contains("volume quota") {
+                                                        eprintln!("🛑 Rate limit hit: {}. Pausing for 120 seconds...", msg);
+                                                        tokio::time::sleep(Duration::from_secs(120)).await;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            other => {
+                                // Check for errors in Unknown events (like the one we saw in logs)
+                                if let WsEvent::Unknown(text) = &other {
+                                    if text.contains("Too Many Requests") || text.contains("volume quota") {
+                                        eprintln!("🛑 Rate limit error received: {}. Pausing for 120 seconds...", text);
+                                        tokio::time::sleep(Duration::from_secs(120)).await;
+                                    }
+                                }
+                            }
                         }
                     }
                     Ok(None) => {
